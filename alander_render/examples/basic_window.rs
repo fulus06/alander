@@ -5,10 +5,19 @@
 use alander_core::scene::{Camera, Transform};
 use alander_render::renderer::{create_cube, Renderer};
 use anyhow::Result;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{info, Level};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::ControlFlow;
+
+/// 性能统计信息
+struct PerformanceStats {
+    frame_count: u32,
+    fps: f32,
+    frame_time_ms: f32,
+    last_update: Instant,
+    last_frame_time: Instant,
+}
 
 fn main() -> Result<()> {
     // 初始化日志
@@ -49,6 +58,15 @@ fn main() -> Result<()> {
         let mut rotation = 0.0f32;
         let mut last_update = Instant::now();
 
+        // 性能统计
+        let mut perf_stats = PerformanceStats {
+            frame_count: 0,
+            fps: 0.0,
+            frame_time_ms: 0.0,
+            last_update: Instant::now(),
+            last_frame_time: Instant::now(),
+        };
+
         // 运行循环
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Poll;
@@ -84,6 +102,29 @@ fn main() -> Result<()> {
                     let delta_time = now.duration_since(last_update).as_secs_f32();
                     last_update = now;
 
+                    // 更新性能统计
+                    let current_frame_time = Instant::now();
+                    let frame_duration =
+                        current_frame_time.duration_since(perf_stats.last_frame_time);
+                    perf_stats.frame_time_ms = frame_duration.as_secs_f32() * 1000.0;
+                    perf_stats.last_frame_time = current_frame_time;
+                    perf_stats.frame_count += 1;
+
+                    // 每秒更新FPS
+                    if current_frame_time.duration_since(perf_stats.last_update)
+                        >= Duration::from_secs(1)
+                    {
+                        perf_stats.fps = perf_stats.frame_count as f32;
+                        perf_stats.frame_count = 0;
+                        perf_stats.last_update = current_frame_time;
+
+                        // 输出性能信息到控制台
+                        println!(
+                            "🎮 性能统计: FPS={:.1}, 帧时间={:.2}ms",
+                            perf_stats.fps, perf_stats.frame_time_ms
+                        );
+                    }
+
                     rotation += delta_time * 1.0; // 每秒旋转1.0弧度
 
                     // 立方体变换
@@ -104,6 +145,11 @@ fn main() -> Result<()> {
                     if let Err(e) = renderer.render() {
                         eprintln!("渲染错误: {}", e);
                         *control_flow = ControlFlow::Exit;
+                    } else {
+                        // 每10帧输出一次详细的渲染信息
+                        if perf_stats.frame_count % 10 == 0 {
+                            println!("📊 渲染状态: 立方体旋转角度={:.2}rad", rotation);
+                        }
                     }
                 }
                 _ => {}
