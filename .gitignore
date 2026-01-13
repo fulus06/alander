@@ -1,0 +1,160 @@
+
+# 编译生成文件
+/target/
+**/*.rs.bk
+**/*.o
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.lib
+**/*.pdb
+**/*.rlib
+**/*.exe
+
+# 临时文件
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+
+# 编辑器/IDE 文件
+.idea/
+.vscode/
+*.swp
+*~
+*.sublime-*
+.DS_Store
+
+# Rust 编译缓存
+.cargo/
+target/
+
+# Cargo 日志
+Cargo.lock
+!Cargo.lock  # 实际上 Cargo.lock 应该提交到版本控制，但如果有特殊需求可以暂时忽略
+
+# 构建产物
+dist/
+build/
+out/
+
+# macOS 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# 日志文件
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 依赖目录
+node_modules/
+
+# 测试覆盖率
+coverage/
+*.lcov
+
+# 环境变量文件
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 调试文件
+*.debug
+*.debug.*
+
+# WebAssembly 相关
+*.wasm
+*.wasm.map
+
+# WSL 特定文件
+.wslconfig
+
+# 临时 Rust 编译文件
+*.d
+*.out
+
+# Visual Studio Code 目录
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# JetBrains IDE
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/dictionaries
+.idea/vcs.xml
+.idea/jsLibraryMappings.xml
+.idea/shelf/
+.idea/.name
+
+# Rust 项目的文档
+/doc/
+
+# Rust 的编译缓存信息
+Cargo.toml.*
+Cargo.lock.*
+
+# 个人配置
+.rustup/
+.vim/
+
+# IDE 配置缓存
+.history/
+
+# 备份文件
+*.bak
+*.backup
+
+# 特定平台构建
+.pio
+.cache/
+
+# 生成的文件
+*.gen.rs
+
+# 项目特定的忽略
+# 例如：alander_render/target/
+#        alander_editor/target/
+
+# 输出目录
+**/debug/
+**/release/
+
+# Cargo 元数据
+.cargo/registry/
+.cargo/git/
+
+# 编译中间文件
+**/obj/
+**/bin/
+
+# Python 相关（如果有 Python 脚本）
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# 大文件
+*.blend
+*.blend1
+*.fbx
+*.obj
+*.mtl
+*.gltf
+*.glb

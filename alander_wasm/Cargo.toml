@@ -1,0 +1,30 @@
+[package]
+name = "alander_wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# 核心模块
+alander_core = { path = "../alander_core" }
+alander_render = { path = "../alander_render" }
+
+# WebAssembly
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true, features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Request", "Response", "console"] }
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+# 控制台日志
+console_log = { version = "1.0", features = ["color"] }
+console_error_panic_hook = { workspace = true }
+log = "0.4"
+
+# 序列化
+serde = { workspace = true }
+serde_json = "1.0"
+
+# 异步
+futures = "0.3"
