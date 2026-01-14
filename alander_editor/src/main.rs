@@ -229,10 +229,19 @@ impl AlanderApp {
     /// 处理输入事件
     fn handle_input(&mut self, event: &winit::event::WindowEvent) {
         // 先让 EGUI 处理事件
-        let egui_res = self.egui_state.on_event(&self.egui_context, event);
+        let _egui_res = self.egui_state.on_event(&self.egui_context, event);
 
-        // 如果 EGUI 消耗了事件（如点击了按钮），我们通常不处理 3D 逻辑
-        // 但对于某些事件（如 CursorMoved），我们可能仍然需要更新内部状态
+        // 计算鼠标是否在 3D 视口内（物理像素坐标）
+        let window_size = self.window.inner_size();
+        let scale_factor = self.window.scale_factor() as f32;
+        let mouse_pos = self.input.mouse_position;
+        
+        let left_px = 200.0 * scale_factor;
+        let right_px = window_size.width as f32 - 250.0 * scale_factor;
+        let top_px = 30.0 * scale_factor; // 假设菜单栏高度稍多一点
+        
+        let is_in_viewport = mouse_pos.x > left_px && mouse_pos.x < right_px && mouse_pos.y > top_px;
+
         match event {
             WindowEvent::Resized(size) => {
                 self.renderer.resize(*size);
@@ -256,18 +265,18 @@ impl AlanderApp {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.input.mouse_buttons.insert(*button, *state);
                 
-                // 只有当 EGUI 没有消耗该点击事件时，才开始轨道相机操作
-                if !egui_res.consumed {
-                    // 使用右键进行轨道旋转
-                    if *button == winit::event::MouseButton::Right {
+                // 仿 Blender: 按住中键拖拽进行旋转
+                // 只要鼠标在视口内，我们就允许旋转，无视 EGUI 是否消耗（因为 CentralPanel 总是会拦截）
+                if is_in_viewport {
+                    if *button == winit::event::MouseButton::Middle {
                         self.editor_state.orbit_controller.is_dragging =
                             *state == winit::event::ElementState::Pressed;
                         if *state == winit::event::ElementState::Pressed {
                             self.editor_state.orbit_controller.last_mouse_pos =
-                                (self.input.mouse_position.x, self.input.mouse_position.y);
-                            tracing::info!("开始相机旋转拖拽");
+                                (mouse_pos.x, mouse_pos.y);
+                            tracing::info!("Blender 轨道旋转开始 (中键)");
                         } else {
-                            tracing::info!("停止相机旋转拖拽");
+                            tracing::info!("Blender 轨道旋转停止");
                         }
                     }
                 }
@@ -282,10 +291,12 @@ impl AlanderApp {
                     let delta_y = self.input.mouse_position.y
                         - self.editor_state.orbit_controller.last_mouse_pos.1;
 
-                    self.editor_state.orbit_controller.rotation.0 += delta_x * 0.005;
-                    self.editor_state.orbit_controller.rotation.1 -= delta_y * 0.005;
+                    // 灵敏度系数
+                    let sensitivity = 0.005;
+                    self.editor_state.orbit_controller.rotation.0 -= delta_x * sensitivity;
+                    self.editor_state.orbit_controller.rotation.1 -= delta_y * sensitivity;
 
-                    // 限制俯仰角，防止相机反转
+                    // 限制俯仰角
                     self.editor_state.orbit_controller.rotation.1 = self
                         .editor_state
                         .orbit_controller
@@ -300,13 +311,13 @@ impl AlanderApp {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // 如果鼠标当前不在 EGUI 阻挡区域（或 EGUI 未消耗滚轮事件）
-                if !egui_res.consumed {
+                // 如果鼠标在中心视口区域，且 EGUI 没在处理复杂的交互（如滑块），就允许缩放
+                if is_in_viewport && !self.egui_context.is_using_pointer() {
                     // 更新轨道控制器距离
-                    let zoom_speed = (self.editor_state.orbit_controller.distance * 0.2).max(1.0);
+                    let zoom_speed = (self.editor_state.orbit_controller.distance * 0.1).max(0.5);
                     let scroll_y = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(_, y) => *y * 2.0, // 增加线滚动增益
-                        winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1, // 增加像素增益
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => *y * 2.0,
+                        winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.05,
                     };
 
                     self.editor_state.orbit_controller.distance -= scroll_y * zoom_speed;
@@ -316,7 +327,6 @@ impl AlanderApp {
                         .distance
                         .clamp(0.1, 2000.0);
 
-                    tracing::info!("相机缩放: 距离 = {:.2}", self.editor_state.orbit_controller.distance);
                     self.update_camera_transform();
                 }
             }
@@ -530,8 +540,8 @@ impl AlanderApp {
     /// 重置相机
     fn reset_camera(&mut self) {
         self.editor_state.orbit_controller = OrbitController {
-            rotation: (std::f32::consts::PI / 2.0, 0.2),
-            distance: 7.0,
+            rotation: (0.0, -0.2), // Yaw: 0, Pitch: -0.2 (看向斜下方)
+            distance: 10.0,
             target: glam::Vec3::ZERO,
             is_dragging: false,
             last_mouse_pos: (0.0, 0.0),
