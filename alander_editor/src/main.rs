@@ -71,6 +71,11 @@ struct AlanderApp {
 
     /// EGUI 渲染器
     egui_renderer: egui_wgpu::Renderer,
+
+    /// FPS 更新定时器
+    fps_update_timer: f32,
+    /// 显示的帧时间
+    displayed_delta_time: f32,
 }
 
 /// 编辑器状态
@@ -186,6 +191,8 @@ impl AlanderApp {
             dock_state,
             egui_renderer,
             physics_manager: PhysicsManager::new(),
+            fps_update_timer: 0.0,
+            displayed_delta_time: 0.0,
         };
 
         app.update_camera_transform();
@@ -515,6 +522,13 @@ impl AlanderApp {
         self.time.delta = delta_time;
         self.time.elapsed += delta_time;
 
+        // 平滑 FPS 显示：每 0.2 秒更新一次显示数值
+        self.fps_update_timer += delta_time;
+        if self.fps_update_timer >= 0.2 {
+            self.displayed_delta_time = delta_time;
+            self.fps_update_timer = 0.0;
+        }
+
         // 更新相机
         self.renderer
             .update_camera(&self.camera, &self.camera_transform);
@@ -630,7 +644,7 @@ impl AlanderApp {
         // 模拟控制栏
         egui::TopBottomPanel::bottom("simulation_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!("帧时间: {:.2}ms", self.time.delta * 1000.0));
+                ui.add(egui::Label::new(egui::RichText::new(format!("帧时间: {:>5.2}ms", self.displayed_delta_time * 1000.0)).monospace()));
                 ui.separator();
                 
                 let play_text = if self.physics_manager.is_running { "⏸ 暂停物理模拟" } else { "▶ 开始物理模拟" };
