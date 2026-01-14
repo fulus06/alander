@@ -1,12 +1,12 @@
 use alander_core::{
-    scene::{Camera, Transform},
+    scene::{Camera, Transform, Name, RenderId, BoundingBox},
     InputState, RenderState, Time,
 };
-use alander_render::renderer::Renderer;
-use alander_render::renderer::create_cube;
+use alander_core::math::{Ray, AABB};
+use alander_render::renderer::{Renderer, create_cube};
 use egui::{self, Color32, Context, FontId, RichText, Ui};
 use egui_dock::{DockArea, NodeIndex, Style};
-use glam::{Mat4, Quat, Vec2, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4Swizzles};
 use std::collections::HashMap;
 use tracing::{info, Level};
 use uuid::Uuid;
@@ -15,6 +15,7 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
+use bevy_ecs::entity::Entity; // Added for Entity type
 
 mod scene_manager;
 use scene_manager::{SceneManager, SceneHandle};
@@ -263,6 +264,10 @@ impl AlanderApp {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if *button == MouseButton::Left && *state == ElementState::Pressed && is_in_viewport {
+                    self.pick_entity();
+                }
+                
                 self.input.mouse_buttons.insert(*button, *state);
                 
                 // 仿 Blender: 按住中键拖拽进行旋转
@@ -348,14 +353,96 @@ impl AlanderApp {
         self.camera_transform.rotation = rotation;
     }
 
+    /// 获取当前相机的视图矩阵
+    fn get_view_matrix(&self) -> Mat4 {
+        Mat4::look_at_rh(
+            self.camera_transform.position,
+            self.editor_state.orbit_controller.target,
+            Vec3::Y, // Up vector
+        )
+    }
+
+    /// 射线拾取实体
+    fn pick_entity(&mut self) {
+        let mouse_pos = self.input.mouse_position;
+        let window_size = self.window.inner_size();
+        let scale_factor = self.window.scale_factor() as f32;
+
+        // 1. 获取视口区域（对应 handle_input 中的 hit-test 逻辑）
+        let viewport_left = 200.0 * scale_factor;
+        let viewport_top = 30.0 * scale_factor;
+        let viewport_right = window_size.width as f32 - 250.0 * scale_factor;
+        let viewport_width = viewport_right - viewport_left;
+        let viewport_height = window_size.height as f32 - viewport_top;
+
+        // 2. 转换鼠标坐标到视口空间 [0, 1]
+        let x = (mouse_pos.x - viewport_left) / viewport_width;
+        let y = (mouse_pos.y - viewport_top) / viewport_height;
+
+        if x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0 {
+            tracing::debug!("鼠标不在 3D 视口内，不进行拾取");
+            return;
+        }
+
+        // 3. 转换到 NDC [-1, 1]
+        let ndc_x = x * 2.0 - 1.0;
+        let ndc_y = 1.0 - y * 2.0; // Y 轴翻转，NDC 中向上为正
+
+        let view = self.get_view_matrix();
+        let proj = self.camera.compute_projection_matrix();
+        
+        // 我们需要 inverse(proj * view)
+        let inv_vp = (proj * view).inverse();
+
+        // 4. 计算射线在世界空间的起点和终点
+        let ndc_near = glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+        let ndc_far = glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+
+        let world_near = inv_vp * ndc_near;
+        let world_far = inv_vp * ndc_far;
+
+        let world_near = world_near.xyz() / world_near.w;
+        let world_far = world_far.xyz() / world_far.w;
+
+        let ray_direction = (world_far - world_near).normalize();
+        let ray = Ray::new(world_near, ray_direction);
+
+        tracing::info!("发起射线采样: 起点 {:?}, 方向 {:?}", ray.origin, ray.direction);
+
+        // 5. 在 ECS 场景中进行遍历检测
+        let mut closest_entity = None;
+        let mut min_dist = f32::INFINITY;
+
+        if let Some(scene) = self.scene_manager.active_scene_mut() {
+            let mut query = scene.world.query::<(Entity, &BoundingBox)>();
+            for (entity, bbox) in query.iter(&scene.world) {
+                if let Some(dist) = ray.intersects_aabb(&bbox.world) {
+                    if dist < min_dist {
+                        min_dist = dist;
+                        closest_entity = Some(entity);
+                    }
+                }
+            }
+        }
+
+        if let Some(entity) = closest_entity {
+            tracing::info!("拾取到实体: {:?}", entity);
+            self.editor_state.selected_entity = Some(entity);
+        } else {
+            tracing::info!("未拾取到任何实体");
+            self.editor_state.selected_entity = None;
+        }
+    }
+
     /// 更新
     fn update(&mut self, delta_time: f32) {
-        // 同步 ECS 中的 Transform 到渲染器中的模型矩阵
+        // 同步 ECS 中的 Transform 到渲染器中的模型矩阵，并同步包围盒
         if let Some(scene) = self.scene_manager.active_scene_mut() {
-            let mut query = scene.world.query::<(&alander_core::scene::Transform, &alander_core::scene::RenderId)>();
-            for (transform, render_id) in query.iter(&scene.world) {
+            let mut query = scene.world.query::<(&alander_core::scene::Transform, &alander_core::scene::RenderId, Option<&mut alander_core::scene::BoundingBox>)>();
+            for (transform, render_id, mut bbox) in query.iter_mut(&mut scene.world) {
                 let matrix = transform.compute_matrix();
-                // 将 glam::Mat4 转换为 cgmath::Matrix4
+                
+                // 同步渲染器
                 let m = matrix.to_cols_array_2d();
                 let cg_matrix = cgmath::Matrix4::new(
                     m[0][0], m[0][1], m[0][2], m[0][3],
@@ -364,6 +451,11 @@ impl AlanderApp {
                     m[3][0], m[3][1], m[3][2], m[3][3],
                 );
                 self.renderer.update_object_model(&render_id.0, cg_matrix);
+
+                // 更新世界空间包围盒
+                if let Some(ref mut bbox) = bbox {
+                    bbox.world = bbox.local.transform(matrix);
+                }
             }
         }
         

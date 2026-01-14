@@ -2,7 +2,8 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Material, Name, RenderId};
+use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox};
+use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
 use alander_core::assets::{AssetManager, AssetLoader, SimpleMeshLoader, SimpleMaterialLoader};
 use bevy_ecs::prelude::*;
@@ -58,7 +59,7 @@ impl Scene {
     }
     
     /// 加载网格资源并添加到渲染器
-    pub fn load_mesh(&mut self, renderer: &mut Renderer, source: &str) -> Result<(alander_core::assets::Handle<alander_core::scene::MeshData>, RenderId), String> {
+    pub fn load_mesh(&mut self, renderer: &mut Renderer, source: &str) -> Result<(alander_core::assets::Handle<alander_core::scene::MeshData>, RenderId, BoundingBox), String> {
         let mut loader = SimpleMeshLoader;
         match loader.load(source) {
             Ok(mesh_data) => {
@@ -74,7 +75,12 @@ impl Scene {
                 let render_uuid = uuid::Uuid::new_v4();
                 renderer.add_object(render_uuid, scene_object);
                 
-                Ok((handle, RenderId(render_uuid)))
+                let bbox = BoundingBox {
+                    local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                    world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                };
+                
+                Ok((handle, RenderId(render_uuid), bbox))
             },
             Err(e) => Err(format!("网格加载失败: {}", e)),
         }
@@ -207,15 +213,20 @@ impl SceneManager {
                     scale: glam::Vec3::new(10.0, 0.1, 10.0), // 扁平的地面
                 },
                 RenderId(ground_uuid),
+                BoundingBox {
+                    local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                    world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                }
             ));
             
             // 创建立方体实体
-            if let Ok((mesh_handle, render_id)) = scene.load_mesh(renderer, "cube") {
+            if let Ok((mesh_handle, render_id, bbox)) = scene.load_mesh(renderer, "cube") {
                 scene.create_entity((
                     Name("立方体".to_string()),
                     Transform::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
                     Mesh { handle: mesh_handle },
                     render_id,
+                    bbox,
                 ));
             }
             
@@ -234,6 +245,10 @@ impl SceneManager {
                     Name(format!("测试实体{}", i)),
                     Transform::from_translation(glam::Vec3::new((i as f32) * 2.0 + 3.0, 0.5, 0.0)),
                     RenderId(cube_uuid),
+                    BoundingBox {
+                        local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                        world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                    }
                 ));
             }
         }

@@ -11,6 +11,92 @@ use std::fmt::Debug;
 /// 数学类型导出
 pub mod math {
     pub use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
+
+    /// 射线
+    #[derive(Debug, Clone, Copy)]
+    pub struct Ray {
+        pub origin: Vec3,
+        pub direction: Vec3,
+    }
+
+    impl Ray {
+        pub fn new(origin: Vec3, direction: Vec3) -> Self {
+            Self { origin, direction: direction.normalize() }
+        }
+
+        /// 获取射线上一点
+        pub fn at(&self, t: f32) -> Vec3 {
+            self.origin + self.direction * t
+        }
+
+        /// 与 AABB 的相交检测 (Slab Method)
+        pub fn intersects_aabb(&self, aabb: &AABB) -> Option<f32> {
+            let inv_dir = Vec3::ONE / self.direction;
+            let t1 = (aabb.min - self.origin) * inv_dir;
+            let t2 = (aabb.max - self.origin) * inv_dir;
+
+            let t_min = t1.min(t2);
+            let t_max = t1.max(t2);
+
+            let t_near = t_min.max_element();
+            let t_far = t_max.min_element();
+
+            if t_near <= t_far && t_far > 0.0 {
+                Some(t_near.max(0.0))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// 轴对齐包围盒 (AABB)
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    pub struct AABB {
+        pub min: Vec3,
+        pub max: Vec3,
+    }
+
+    impl AABB {
+        pub fn new(min: Vec3, max: Vec3) -> Self {
+            Self { min, max }
+        }
+
+        /// 从一组点创建 AABB
+        pub fn from_points(points: &[Vec3]) -> Self {
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for &p in points {
+                min = min.min(p);
+                max = max.max(p);
+            }
+            Self { min, max }
+        }
+
+        /// 变换 AABB (计算新的轴对齐 AABB)
+        pub fn transform(&self, matrix: Mat4) -> Self {
+            let corners = [
+                Vec3::new(self.min.x, self.min.y, self.min.z),
+                Vec3::new(self.min.x, self.min.y, self.max.z),
+                Vec3::new(self.min.x, self.max.y, self.min.z),
+                Vec3::new(self.min.x, self.max.y, self.max.z),
+                Vec3::new(self.max.x, self.min.y, self.min.z),
+                Vec3::new(self.max.x, self.min.y, self.max.z),
+                Vec3::new(self.max.x, self.max.y, self.min.z),
+                Vec3::new(self.max.x, self.max.y, self.max.z),
+            ];
+
+            let mut new_min = Vec3::splat(f32::INFINITY);
+            let mut new_max = Vec3::splat(f32::NEG_INFINITY);
+
+            for &c in &corners {
+                let transformed = matrix.transform_point3(c);
+                new_min = new_min.min(transformed);
+                new_max = new_max.max(transformed);
+            }
+
+            Self { min: new_min, max: new_max }
+        }
+    }
 }
 
 /// 资源系统
@@ -161,6 +247,13 @@ pub mod scene {
     #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
     pub struct RenderId(pub uuid::Uuid);
 
+    /// 包围盒组件，用于拾取和裁剪
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct BoundingBox {
+        pub local: math::AABB,
+        pub world: math::AABB,
+    }
+
     impl Camera {
         /// 创建透视相机
         pub fn perspective(fov_y: f32, aspect_ratio: f32, near: f32, far: f32) -> Self {
@@ -186,7 +279,7 @@ pub mod scene {
         }
 
         /// 计算投影矩阵
-        pub fn projection_matrix(&self) -> Mat4 {
+        pub fn compute_projection_matrix(&self) -> Mat4 {
             match &self.projection {
                 Projection::Perspective(p) => {
                     Mat4::perspective_rh_gl(p.fov_y, p.aspect_ratio, p.near, p.far)
