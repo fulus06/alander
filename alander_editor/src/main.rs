@@ -1,5 +1,5 @@
 use alander_core::{
-    scene::{Camera, Transform, Name, RenderId, BoundingBox, PBRMaterial, PointLight},
+    scene::{Camera, Transform, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, ColliderShape},
     InputState, RenderState, Time,
 };
 use alander_core::math::{Ray, AABB};
@@ -18,7 +18,9 @@ use winit::{
 use bevy_ecs::entity::Entity; // Added for Entity type
 
 mod scene_manager;
+mod physics_manager;
 use scene_manager::{SceneManager, SceneHandle};
+use physics_manager::PhysicsManager;
 
 /// 应用程序状态
 struct AlanderApp {
@@ -57,6 +59,9 @@ struct AlanderApp {
 
     /// EGUI 上下文
     egui_context: egui::Context,
+
+    /// 物理管理器
+    physics_manager: PhysicsManager,
 
     /// EGUI 状态
     egui_state: egui_winit::State,
@@ -180,6 +185,7 @@ impl AlanderApp {
             egui_state,
             dock_state,
             egui_renderer,
+            physics_manager: PhysicsManager::new(),
         };
 
         app.update_camera_transform();
@@ -437,6 +443,21 @@ impl AlanderApp {
 
     /// 更新
     fn update(&mut self, delta_time: f32) {
+        // 物理更新
+        if let Some(scene) = self.scene_manager.active_scene_mut() {
+            // 设置物理步长 (简单的变步长处理，实际项目中建议使用固定步长)
+            self.physics_manager.integration_parameters.dt = delta_time;
+            
+            // 同步 ECS -> 物理世界
+            self.physics_manager.sync_ecs_to_physics(&mut scene.world);
+            
+            // 物理步进
+            self.physics_manager.step();
+            
+            // 同步 物理世界 -> ECS
+            self.physics_manager.sync_physics_to_ecs(&mut scene.world);
+        }
+
         // 同步 ECS 中的 Transform 到渲染器中的模型矩阵，并同步包围盒与材质
         if let Some(scene) = self.scene_manager.active_scene_mut() {
             // 1. 同步光源
@@ -605,6 +626,23 @@ impl AlanderApp {
                 });
             });
         });
+        
+        // 模拟控制栏
+        egui::TopBottomPanel::bottom("simulation_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("帧时间: {:.2}ms", self.time.delta * 1000.0));
+                ui.separator();
+                
+                let play_text = if self.physics_manager.is_running { "⏸ 暂停物理模拟" } else { "▶ 开始物理模拟" };
+                if ui.button(play_text).clicked() {
+                    self.physics_manager.is_running = !self.physics_manager.is_running;
+                }
+                
+                ui.separator();
+                ui.label("重力:");
+                ui.add(egui::DragValue::new(&mut self.physics_manager.gravity.y).speed(0.1));
+            });
+        });
 
         // 2. 左侧场景面板
         egui::SidePanel::left("scene_panel")
@@ -746,6 +784,54 @@ impl AlanderApp {
                                     if ui.color_edit_button_rgb(&mut color_arr).changed() {
                                         mat.emissive = glam::Vec3::from_slice(&color_arr);
                                     }
+                                });
+                            });
+                        }
+
+                        // 刚体 (RigidBody) 编辑
+                        let mut rb_query = scene.world.query::<&mut alander_core::scene::RigidBody>();
+                        if let Ok(mut rb) = rb_query.get_mut(&mut scene.world, entity) {
+                            ui.collapsing("刚体 (RigidBody)", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("类型");
+                                    let mut rb_type_idx = match rb.body_type {
+                                        RigidBodyType::Static => 0,
+                                        RigidBodyType::Dynamic => 1,
+                                        RigidBodyType::KinematicVelocityBased => 2,
+                                        RigidBodyType::KinematicPositionBased => 3,
+                                    };
+                                    
+                                    let preview = match rb_type_idx {
+                                        0 => "静态 (Static)",
+                                        1 => "动态 (Dynamic)",
+                                        2 => "运动学 (速度)",
+                                        3 => "运动学 (位置)",
+                                        _ => "未知",
+                                    };
+
+                                    egui::ComboBox::from_id_source("rb_type")
+                                        .selected_text(preview)
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_value(&mut rb_type_idx, 0, "静态 (Static)").clicked() { rb.body_type = RigidBodyType::Static; }
+                                            if ui.selectable_value(&mut rb_type_idx, 1, "动态 (Dynamic)").clicked() { rb.body_type = RigidBodyType::Dynamic; }
+                                            if ui.selectable_value(&mut rb_type_idx, 2, "运动学 (速度)").clicked() { rb.body_type = RigidBodyType::KinematicVelocityBased; }
+                                            if ui.selectable_value(&mut rb_type_idx, 3, "运动学 (位置)").clicked() { rb.body_type = RigidBodyType::KinematicPositionBased; }
+                                        });
+                                });
+                            });
+                        }
+
+                        // 碰撞体 (Collider) 编辑
+                        let mut col_query = scene.world.query::<&mut alander_core::scene::Collider>();
+                        if let Ok(mut col) = col_query.get_mut(&mut scene.world, entity) {
+                            ui.collapsing("碰撞体 (Collider)", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("摩擦力");
+                                    ui.add(egui::DragValue::new(&mut col.friction).speed(0.01).clamp_range(0.0..=2.0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("弹性");
+                                    ui.add(egui::DragValue::new(&mut col.restitution).speed(0.01).clamp_range(0.0..=1.0));
                                 });
                             });
                         }

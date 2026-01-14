@@ -292,6 +292,84 @@ pub mod scene {
         }
     }
 
+    /// 刚体类型
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+    pub enum RigidBodyType {
+        /// 静态 (不移动)
+        Static,
+        /// 动态 (受力影响)
+        Dynamic,
+        /// 运动学 (通过速度控制)
+        KinematicVelocityBased,
+        /// 运动学 (通过位置控制)
+        KinematicPositionBased,
+    }
+
+    /// 刚体组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize)]
+    pub struct RigidBody {
+        pub body_type: RigidBodyType,
+        #[serde(skip)]
+        pub handle_index: Option<u32>,
+        #[serde(skip)]
+        pub handle_generation: Option<u32>,
+    }
+
+    impl RigidBody {
+        pub fn new(body_type: RigidBodyType) -> Self {
+            Self {
+                body_type,
+                handle_index: None,
+                handle_generation: None,
+            }
+        }
+    }
+
+    /// 碰撞体形状
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub enum ColliderShape {
+        /// 球体 (半径)
+        Ball { radius: f32 },
+        /// 盒体 (半长宽高)
+        Cuboid { half_extents: Vec3 },
+        /// 胶囊体 (半高，半径)
+        Capsule { half_height: f32, radius: f32 },
+    }
+
+    /// 碰撞体组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize)]
+    pub struct Collider {
+        pub shape: ColliderShape,
+        pub friction: f32,
+        pub restitution: f32,
+        #[serde(skip)]
+        pub handle_index: Option<u32>,
+        #[serde(skip)]
+        pub handle_generation: Option<u32>,
+    }
+
+    impl Collider {
+        pub fn ball(radius: f32) -> Self {
+            Self {
+                shape: ColliderShape::Ball { radius },
+                friction: 0.5,
+                restitution: 0.0,
+                handle_index: None,
+                handle_generation: None,
+            }
+        }
+
+        pub fn cuboid(hx: f32, hy: f32, hz: f32) -> Self {
+            Self {
+                shape: ColliderShape::Cuboid { half_extents: Vec3::new(hx, hy, hz) },
+                friction: 0.5,
+                restitution: 0.0,
+                handle_index: None,
+                handle_generation: None,
+            }
+        }
+    }
+
     impl Camera {
         /// 创建透视相机
         pub fn perspective(fov_y: f32, aspect_ratio: f32, near: f32, far: f32) -> Self {

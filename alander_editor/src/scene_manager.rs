@@ -2,7 +2,7 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox, PBRMaterial, PointLight};
+use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType};
 use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
 use alander_core::assets::{AssetManager, AssetLoader, SimpleMeshLoader, SimpleMaterialLoader};
@@ -224,7 +224,9 @@ impl SceneManager {
                     metallic: 0.1,
                     roughness: 0.8,
                     emissive: glam::Vec3::ZERO,
-                }
+                },
+                RigidBody::new(RigidBodyType::Static),
+                Collider::cuboid(5.0, 0.05, 5.0),
             ));
             
             // 创建主要立方体实体
@@ -240,7 +242,9 @@ impl SceneManager {
                         metallic: 0.8,
                         roughness: 0.2,
                         emissive: glam::Vec3::ZERO,
-                    }
+                    },
+                    RigidBody::new(RigidBodyType::Dynamic),
+                    Collider::cuboid(0.5, 0.5, 0.5),
                 ));
             }
 

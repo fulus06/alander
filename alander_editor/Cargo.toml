@@ -46,6 +46,7 @@ cgmath = "0.18"
 pollster = "0.3"
 uuid = { version = "1.4", features = ["v4", "serde"] }
 rfd = "0.12"
+rapier3d = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { workspace = true }
