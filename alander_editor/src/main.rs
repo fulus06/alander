@@ -426,45 +426,73 @@ impl AlanderApp {
 
     /// UI渲染
     fn ui(&mut self, ctx: &egui::Context) {
-        // 全屏 Dock 系统
+        // 1. 顶部菜单栏
+        egui::TopBottomPanel::top("top_menu").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("文件", |ui| {
+                    if ui.button("打开").clicked() {
+                        self.on_file_open();
+                        ui.close_menu();
+                    }
+                    if ui.button("保存").clicked() {
+                        self.on_file_save();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("退出").clicked() {
+                        self.running = false;
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("视图", |ui| {
+                    if ui.button("重置相机").clicked() {
+                        self.reset_camera();
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+
+        // 2. 左侧场景面板
+        egui::SidePanel::left("scene_panel")
+            .resizable(true)
+            .default_width(200.0)
+            .show(ctx, |ui| {
+                ui.heading("场景管理器");
+                ui.separator();
+                for (handle, name) in self.scene_manager.get_scenes() {
+                    let label = if Some(handle) == self.scene_manager.active_scene().map(|s| &s.handle) {
+                        egui::RichText::new(name).strong().color(egui::Color32::from_rgb(255, 255, 0))
+                    } else {
+                        egui::RichText::new(name)
+                    };
+                    
+                    if ui.selectable_label(false, label).clicked() {
+                        // 切换场景逻辑
+                    }
+                }
+            });
+
+        // 3. 右侧属性面板
+        egui::SidePanel::right("properties_panel")
+            .resizable(true)
+            .default_width(250.0)
+            .show(ctx, |ui| {
+                ui.heading("实体属性");
+                ui.separator();
+                if let Some(id) = self.editor_state.selected_entity {
+                    ui.label(format!("UUID: {}", id));
+                    // 更多属性编辑...
+                } else {
+                    ui.label("未选中实体");
+                }
+            });
+
+        // 4. 中央透明区域（用于查看 3D 场景）
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
-            .show(ctx, |ui| {
-                // 顶部菜单栏
-                egui::menu::bar(ui, |ui| {
-                    ui.menu_button("文件", |ui| {
-                        if ui.button("打开").clicked() {
-                            self.on_file_open();
-                            ui.close_menu();
-                        }
-                        if ui.button("保存").clicked() {
-                            self.on_file_save();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("退出").clicked() {
-                            self.running = false;
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("视图", |ui| {
-                        if ui.button("重置相机").clicked() {
-                            self.reset_camera();
-                            ui.close_menu();
-                        }
-                    });
-                });
-
-                // Dock 区域
-                let mut dock_state = std::mem::replace(&mut self.dock_state, egui_dock::DockState::new(vec![]));
-                
-                egui_dock::DockArea::new(&mut dock_state)
-                    .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
-                    .show(ctx, &mut TabViewer {
-                        app: self,
-                    });
-
-                self.dock_state = dock_state;
+            .show(ctx, |_ui| {
+                // 中央区域留空，背景将显示 3D 场景
             });
     }
 
