@@ -1,5 +1,5 @@
 use alander_core::{
-    scene::{Camera, Transform, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, ColliderShape},
+    scene::{Camera, Transform, BoundingBox, PointLight, RigidBodyType, ColliderShape},
     InputState, RenderState, Time,
 };
 use alander_core::math::{Ray, AABB};
@@ -618,12 +618,17 @@ impl AlanderApp {
         egui::TopBottomPanel::top("top_menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("文件", |ui| {
-                    if ui.button("打开").clicked() {
+                    if ui.button("打开场景").clicked() {
                         self.on_file_open();
                         ui.close_menu();
                     }
-                    if ui.button("保存").clicked() {
+                    if ui.button("保存场景").clicked() {
                         self.on_file_save();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("导入模型 (glTF)").clicked() {
+                        self.on_import_model();
                         ui.close_menu();
                     }
                     ui.separator();
@@ -866,8 +871,8 @@ impl AlanderApp {
     }
 
 
-    /// 文件打开回调
-    fn on_file_open(&mut self) {
+    /// 导入模型回调
+    fn on_import_model(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("glTF 模型", &["gltf", "glb"])
             .pick_file()
@@ -895,13 +900,17 @@ impl AlanderApp {
                             let (scale, rotation, translation) = transform_mat.to_scale_rotation_translation();
                             
                             scene.create_entity((
-                                alander_core::scene::Name(name),
+                                alander_core::scene::Name(name.clone()),
                                 alander_core::scene::Transform {
                                     position: translation,
                                     rotation,
                                     scale,
                                 },
                                 alander_core::scene::RenderId(render_id),
+                                alander_core::scene::AssetPath {
+                                    path: path_str.to_string(),
+                                    sub_asset: Some(name),
+                                },
                             ));
                         }
                     }
@@ -913,9 +922,62 @@ impl AlanderApp {
         }
     }
 
-    /// 文件保存回调
+    /// 文件打开回调 (加载场景)
+    fn on_file_open(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Alander 场景", &["json"])
+            .pick_file()
+        {
+            let path_str = path.to_string_lossy();
+            match std::fs::read_to_string(&path) {
+                Ok(json) => {
+                    match crate::scene_manager::Scene::from_json(&json, &mut self.renderer) {
+                        Ok(new_scene) => {
+                            {
+                                if let Some(scene) = self.scene_manager.active_scene_mut() {
+                                    // 清理旧渲染对象
+                                    for entity in scene.world.iter_entities() {
+                                        if let Some(render_id) = scene.world.get::<alander_core::scene::RenderId>(entity.id()) {
+                                            self.renderer.remove_object(&render_id.0);
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // 这里需要 SceneManager 支持替换或添加
+                            // 暂定直接替换当前场景（如果存在）
+                            let _handle = new_scene.handle;
+                            self.scene_manager.create_scene_from_object(new_scene);
+                            tracing::info!("成功加载场景: {}", path_str);
+                        }
+                        Err(e) => tracing::error!("解析场景 JSON 失败: {}", e),
+                    }
+                }
+                Err(e) => tracing::error!("读取场景文件失败: {}", e),
+            }
+        }
+    }
+
+    /// 文件保存回调 (保存场景)
     fn on_file_save(&mut self) {
-        // TODO: 实现文件保存
+        if let Some(scene) = self.scene_manager.active_scene() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Alander 场景", &["json"])
+                .set_file_name("scene.json")
+                .save_file()
+            {
+                match scene.to_json() {
+                    Ok(json) => {
+                        if let Err(e) = std::fs::write(&path, json) {
+                            tracing::error!("写入场景文件失败: {}", e);
+                        } else {
+                            tracing::info!("场景已保存至: {}", path.display());
+                        }
+                    }
+                    Err(e) => tracing::error!("序列化场景失败: {}", e),
+                }
+            }
+        }
     }
 
     /// 重置相机

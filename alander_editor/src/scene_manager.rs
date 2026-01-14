@@ -2,9 +2,11 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType};
+use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath};
+use serde::{Serialize, Deserialize};
 use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
+use alander_render::pipelines::{SceneObject, Vertex, MaterialBuffer};
 use alander_core::assets::{AssetManager, AssetLoader, SimpleMeshLoader, SimpleMaterialLoader};
 use bevy_ecs::prelude::*;
 use glam::Vec3;
@@ -59,20 +61,33 @@ impl Scene {
     }
     
     /// 加载网格资源并添加到渲染器
-    pub fn load_mesh(&mut self, renderer: &mut Renderer, source: &str) -> Result<(alander_core::assets::Handle<alander_core::scene::MeshData>, RenderId, BoundingBox), String> {
+    pub fn load_mesh(&mut self, renderer: &mut Renderer, source: &str) -> Result<(alander_core::assets::Handle<alander_core::scene::MeshData>, RenderId, BoundingBox, AssetPath), String> {
         let mut loader = SimpleMeshLoader;
         match loader.load(source) {
             Ok(mesh_data) => {
                 let handle = self.mesh_manager.load(mesh_data.clone());
                 
-                // 将网格直接添加到渲染器
-                let scene_object = create_cube(
+                let mesh_data_clone = mesh_data.clone();
+                let render_vertices: Vec<Vertex> = mesh_data_clone.vertices.iter().map(|v| {
+                    Vertex {
+                        position: v.position.to_array(),
+                        normal: v.normal.to_array(),
+                        uv: v.uv.to_array(),
+                    }
+                }).collect();
+
+                let scene_object = SceneObject::new(
                     renderer.device(),
+                    &render_vertices,
+                    &mesh_data_clone.indices,
                     &renderer.pipelines().mesh.model_bind_group_layout,
                     &renderer.pipelines().mesh.texture_bind_group_layout,
                     &renderer.pipelines().mesh.material_bind_group_layout,
                     renderer.default_texture(),
+                    glam::Mat4::IDENTITY,
+                    MaterialBuffer::default(),
                 );
+                
                 let render_uuid = uuid::Uuid::new_v4();
                 renderer.add_object(render_uuid, scene_object);
                 
@@ -81,7 +96,12 @@ impl Scene {
                     world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
                 };
                 
-                Ok((handle, RenderId(render_uuid), bbox))
+                let asset_path = AssetPath {
+                    path: source.to_string(),
+                    sub_asset: None,
+                };
+                
+                Ok((handle, RenderId(render_uuid), bbox, asset_path))
             },
             Err(e) => Err(format!("网格加载失败: {}", e)),
         }
@@ -126,6 +146,155 @@ impl Scene {
             false
         }
     }
+
+    /// 将场景保存为 JSON 字符串
+    pub fn to_json(&self) -> Result<String, String> {
+        let mut entities_data = Vec::new();
+
+        for entity in self.world.iter_entities() {
+            let entity_id = entity.id();
+            
+            let name = self.world.get::<Name>(entity_id).cloned();
+            let transform = self.world.get::<Transform>(entity_id).cloned();
+            let pbr_material = self.world.get::<PBRMaterial>(entity_id).cloned();
+            let point_light = self.world.get::<PointLight>(entity_id).cloned();
+            let rigid_body = self.world.get::<RigidBody>(entity_id).cloned();
+            let collider = self.world.get::<Collider>(entity_id).cloned();
+            let asset_path = self.world.get::<AssetPath>(entity_id).cloned();
+
+            entities_data.push(EntityData {
+                name,
+                transform,
+                pbr_material,
+                point_light,
+                rigid_body,
+                collider,
+                asset_path,
+            });
+        }
+
+        let scene_data = SceneData {
+            name: self.name.clone(),
+            entities: entities_data,
+        };
+
+        serde_json::to_string_pretty(&scene_data).map_err(|e| e.to_string())
+    }
+
+    /// 从 JSON 字符串加载场景
+    pub fn from_json(json: &str, renderer: &mut Renderer) -> Result<Self, String> {
+        let scene_data: SceneData = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let mut scene = Scene::new(&scene_data.name);
+
+        // 使用本地缓存避免重复加载同一个 glTF，以及已加载到渲染器的纹理映射
+        let mut gltf_cache: HashMap<String, (alander_core::assets::GltfModel, HashMap<usize, usize>)> = HashMap::new();
+
+        for entity_data in scene_data.entities {
+            let mut asset_info = None;
+            
+            if let Some(ref asset_path) = entity_data.asset_path {
+                if asset_path.path.ends_with(".glb") || asset_path.path.ends_with(".gltf") {
+                    // 处理 glTF 资产
+                    if !gltf_cache.contains_key(&asset_path.path) {
+                        let loader = alander_core::assets::GltfLoader;
+                        match loader.load_scene(&asset_path.path) {
+                            Ok(m) => {
+                                let t_map = renderer.load_gltf_textures(&m);
+                                gltf_cache.insert(asset_path.path.clone(), (m, t_map));
+                            }
+                            Err(e) => {
+                                tracing::error!("查找 glTF 失败 {}: {}", asset_path.path, e);
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some((model, texture_map)) = gltf_cache.get(&asset_path.path) {
+                        // 寻找匹配的 Mesh
+                        let sub_name = asset_path.sub_asset.as_deref().unwrap_or("");
+                        if let Some(gltf_mesh) = model.meshes.iter().find(|m| m.data.name == sub_name || sub_name.is_empty()) {
+                            // 获取对应的纹理
+                            let diffuse_texture = renderer.get_diffuse_texture_for_gltf(model, gltf_mesh, texture_map);
+
+                            // 将此网格数据转换并添加到渲染器
+                            let render_vertices: Vec<Vertex> = gltf_mesh.data.vertices.iter().map(|v| {
+                                Vertex {
+                                    position: v.position.to_array(),
+                                    normal: v.normal.to_array(),
+                                    uv: v.uv.to_array(),
+                                }
+                            }).collect();
+
+                            let scene_object = SceneObject::new(
+                                renderer.device(),
+                                &render_vertices,
+                                &gltf_mesh.data.indices,
+                                &renderer.pipelines().mesh.model_bind_group_layout,
+                                &renderer.pipelines().mesh.texture_bind_group_layout,
+                                &renderer.pipelines().mesh.material_bind_group_layout,
+                                diffuse_texture,
+                                glam::Mat4::IDENTITY,
+                                MaterialBuffer::default(),
+                            );
+                            let render_uuid = uuid::Uuid::new_v4();
+                            renderer.add_object(render_uuid, scene_object);
+
+                            let handle = scene.mesh_manager.load(gltf_mesh.data.clone());
+                            let bbox = BoundingBox {
+                                local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                                world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                            };
+                            asset_info = Some((handle, RenderId(render_uuid), bbox, asset_path.clone()));
+                        }
+                    }
+                } else {
+                    // 处理普通资产（如 "cube"）
+                    match scene.load_mesh(renderer, &asset_path.path) {
+                        Ok(info) => asset_info = Some(info),
+                        Err(e) => tracing::error!("场景加载时无法重载网格 {}: {}", asset_path.path, e),
+                    }
+                }
+            }
+
+            // 2. 创建实体并插入组件
+            let mut entity_builder = scene.world.spawn_empty();
+            
+            if let Some(name) = entity_data.name { entity_builder.insert(name); }
+            if let Some(transform) = entity_data.transform { entity_builder.insert(transform); }
+            if let Some(pbr_material) = entity_data.pbr_material { entity_builder.insert(pbr_material); }
+            if let Some(point_light) = entity_data.point_light { entity_builder.insert(point_light); }
+            if let Some(rigid_body) = entity_data.rigid_body { entity_builder.insert(rigid_body); }
+            if let Some(collider) = entity_data.collider { entity_builder.insert(collider); }
+
+            if let Some((handle, render_id, bbox, path)) = asset_info {
+                entity_builder.insert(Mesh { handle });
+                entity_builder.insert(render_id);
+                entity_builder.insert(bbox);
+                entity_builder.insert(path);
+            }
+        }
+
+        Ok(scene)
+    }
+}
+
+/// 场景序列化结构
+#[derive(Serialize, Deserialize)]
+pub struct SceneData {
+    pub name: String,
+    pub entities: Vec<EntityData>,
+}
+
+/// 实体序列化结构
+#[derive(Serialize, Deserialize)]
+pub struct EntityData {
+    pub name: Option<Name>,
+    pub transform: Option<Transform>,
+    pub pbr_material: Option<PBRMaterial>,
+    pub point_light: Option<PointLight>,
+    pub rigid_body: Option<RigidBody>,
+    pub collider: Option<Collider>,
+    pub asset_path: Option<AssetPath>,
 }
 
 /// 场景管理器
@@ -190,6 +359,14 @@ impl SceneManager {
         }
         self.scenes.remove(&handle).is_some()
     }
+
+    /// 从现有场景对象创建（加载）场景
+    pub fn create_scene_from_object(&mut self, scene: Scene) -> SceneHandle {
+        let handle = scene.handle;
+        self.scenes.insert(handle, scene);
+        self.active_scene = Some(handle);
+        handle
+    }
     
     /// 创建测试场景
     pub fn create_test_scene(&mut self, renderer: &mut Renderer) -> SceneHandle {
@@ -230,13 +407,14 @@ impl SceneManager {
             ));
             
             // 创建主要立方体实体
-            if let Ok((mesh_handle, render_id, bbox)) = scene.load_mesh(renderer, "cube") {
+            if let Ok((mesh_handle, render_id, bbox, asset_path)) = scene.load_mesh(renderer, "cube") {
                 scene.create_entity((
                     Name("主立方体".to_string()),
                     Transform::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
                     Mesh { handle: mesh_handle },
                     render_id,
                     bbox,
+                    asset_path,
                     PBRMaterial {
                         base_color: glam::Vec4::new(1.0, 0.3, 0.3, 1.0), // 红色材质
                         metallic: 0.8,
@@ -261,26 +439,17 @@ impl SceneManager {
             
             // 创建更多测试实体
             for i in 0..3 {
-                let cube_object = create_cube(
-                    renderer.device(),
-                    &renderer.pipelines().mesh.model_bind_group_layout,
-                    &renderer.pipelines().mesh.texture_bind_group_layout,
-                    &renderer.pipelines().mesh.material_bind_group_layout,
-                    renderer.default_texture(),
-                );
-                let cube_uuid = uuid::Uuid::new_v4();
-                renderer.add_object(cube_uuid, cube_object);
-
-                scene.create_entity((
-                    Name(format!("测试实体{}", i)),
-                    Transform::from_translation(glam::Vec3::new((i as f32) * 2.0 + 3.0, 0.5, 0.0)),
-                    RenderId(cube_uuid),
-                    BoundingBox {
-                        local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
-                        world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
-                    },
-                    PBRMaterial::default(),
-                ));
+                if let Ok((mesh_handle, render_id, bbox, asset_path)) = scene.load_mesh(renderer, "cube") {
+                    scene.create_entity((
+                        Name(format!("测试实体{}", i)),
+                        Transform::from_translation(glam::Vec3::new((i as f32) * 2.0 + 3.0, 0.5, 0.0)),
+                        Mesh { handle: mesh_handle },
+                        render_id,
+                        bbox,
+                        asset_path,
+                        PBRMaterial::default(),
+                    ));
+                }
             }
         }
         

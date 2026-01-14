@@ -205,48 +205,14 @@ impl Renderer {
     }
 
     /// 添加 glTF 模型
+    /// 添加 glTF 模型
     pub fn add_gltf_model(&mut self, model: alander_core::assets::GltfModel) -> Vec<uuid::Uuid> {
-        let mut image_to_texture = std::collections::HashMap::new();
-        
-        // 1. 加载所有图像作为 WGPU 纹理
-        for (i, img) in model.images.into_iter().enumerate() {
-            if let Ok(texture) = crate::texture::Texture::from_image(
-                self.renderer.device(),
-                self.renderer.queue(),
-                &img,
-                Some(&format!("glTF 纹理 {}", i)),
-            ) {
-                image_to_texture.insert(i, self.textures.len());
-                self.textures.push(texture);
-            }
-        }
-
+        let image_to_texture = self.load_gltf_textures(&model);
         let mut object_ids = Vec::new();
 
         // 2. 将 glTF 网格转换为场景对象
-        for gltf_mesh in model.meshes {
-            // 获取材质绑定的纹理
-            let diffuse_texture = if let Some(mat_idx) = gltf_mesh.material_index {
-                if let Some(material) = model.materials.get(mat_idx) {
-                    if let Some(img_idx_str) = &material.base_color_texture {
-                        if let Ok(img_idx) = img_idx_str.parse::<usize>() {
-                            if let Some(&texture_idx) = image_to_texture.get(&img_idx) {
-                                &self.textures[texture_idx]
-                            } else {
-                                &self.default_texture
-                            }
-                        } else {
-                            &self.default_texture
-                        }
-                    } else {
-                        &self.default_texture
-                    }
-                } else {
-                    &self.default_texture
-                }
-            } else {
-                &self.default_texture
-            };
+        for gltf_mesh in &model.meshes {
+            let diffuse_texture = self.get_diffuse_texture_for_gltf(&model, gltf_mesh, &image_to_texture);
 
             let scene_object = SceneObject::new(
                 self.renderer.device(),
@@ -270,6 +236,45 @@ impl Renderer {
         }
 
         object_ids
+    }
+
+    /// 加载 glTF 模型中的所有纹理并返回索引映射
+    pub fn load_gltf_textures(&mut self, model: &alander_core::assets::GltfModel) -> HashMap<usize, usize> {
+        let mut image_to_texture = HashMap::new();
+        
+        for (i, img) in model.images.iter().enumerate() {
+            if let Ok(texture) = crate::texture::Texture::from_image(
+                self.renderer.device(),
+                self.renderer.queue(),
+                &img,
+                Some(&format!("glTF 纹理 {}", i)),
+            ) {
+                image_to_texture.insert(i, self.textures.len());
+                self.textures.push(texture);
+            }
+        }
+        image_to_texture
+    }
+
+    /// 根据 glTF 模型及网格获取对应的漫反射贴图
+    pub fn get_diffuse_texture_for_gltf<'a>(
+        &'a self, 
+        model: &alander_core::assets::GltfModel, 
+        mesh: &alander_core::assets::GltfMesh,
+        image_to_texture: &HashMap<usize, usize>
+    ) -> &'a crate::texture::Texture {
+        if let Some(mat_idx) = mesh.material_index {
+            if let Some(material) = model.materials.get(mat_idx) {
+                if let Some(img_idx_str) = &material.base_color_texture {
+                    if let Ok(img_idx) = img_idx_str.parse::<usize>() {
+                        if let Some(&texture_idx) = image_to_texture.get(&img_idx) {
+                            return &self.textures[texture_idx];
+                        }
+                    }
+                }
+            }
+        }
+        &self.default_texture
     }
 
     /// 添加场景对象

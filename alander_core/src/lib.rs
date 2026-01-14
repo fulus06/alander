@@ -254,6 +254,13 @@ pub mod scene {
         pub world: math::AABB,
     }
 
+    /// 资产路径组件，用于记录模型来源以便持久化
+    #[derive(Component, Debug, Clone, Serialize, Deserialize)]
+    pub struct AssetPath {
+        pub path: String,
+        pub sub_asset: Option<String>,
+    }
+
     /// PBR 材质组件
     #[derive(Component, Debug, Clone, Serialize, Deserialize)]
     pub struct PBRMaterial {
