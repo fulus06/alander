@@ -207,7 +207,8 @@ impl GltfLoader {
                 metallic: pbr.metallic_factor(),
                 roughness: pbr.roughness_factor(),
                 base_color_texture: pbr.base_color_texture().map(|t| t.texture().source().index().to_string()),
-                ..Default::default()
+                normal_texture: material.normal_texture().map(|t| t.texture().source().index().to_string()),
+                metallic_roughness_texture: pbr.metallic_roughness_texture().map(|t| t.texture().source().index().to_string()),
             });
         }
 
@@ -236,13 +237,18 @@ impl GltfLoader {
                             .map(|uv| uv.into_f32().collect())
                             .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
 
+                        let tangents: Vec<[f32; 4]> = reader.read_tangents()
+                            .map(|t| t.collect())
+                            .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
+
                         let mut mesh_vertices = Vec::new();
                         for i in 0..positions.len() {
-                            mesh_vertices.push(Vertex {
-                                position: positions[i].into(),
-                                normal: normals[i].into(),
-                                uv: uvs[i].into(),
-                            });
+                            mesh_vertices.push(Vertex::with_tangent(
+                                positions[i].into(),
+                                normals[i].into(),
+                                uvs[i].into(),
+                                tangents[i].into(),
+                            ));
                         }
 
                         let mut mesh_indices = Vec::new();
@@ -297,14 +303,18 @@ impl GltfLoader {
                     let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0)
                         .map(|uv| uv.into_f32().collect())
                         .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+                    let tangents: Vec<[f32; 4]> = reader.read_tangents()
+                        .map(|t| t.collect())
+                        .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
 
                     let mut mesh_vertices = Vec::new();
                     for i in 0..positions.len() {
-                        mesh_vertices.push(Vertex {
-                            position: positions[i].into(),
-                            normal: normals[i].into(),
-                            uv: uvs[i].into(),
-                        });
+                        mesh_vertices.push(Vertex::with_tangent(
+                            positions[i].into(),
+                            normals[i].into(),
+                            uvs[i].into(),
+                            tangents[i].into(),
+                        ));
                     }
 
                     let mut mesh_indices = Vec::new();

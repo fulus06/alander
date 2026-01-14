@@ -30,8 +30,14 @@ pub struct Renderer {
     objects: HashMap<uuid::Uuid, SceneObject>,
     // 默认纹理
     default_texture: crate::texture::Texture,
+    // 默认立方体贴图 (IBL)
+    dummy_cubemap: crate::texture::Texture,
     // 纹理集
     textures: Vec<crate::texture::Texture>,
+    // 天空盒
+    skybox_texture: crate::texture::Texture,
+    skybox_bind_group: wgpu::BindGroup,
+    skybox_camera_bind_group: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -77,12 +83,19 @@ impl Renderer {
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
 
-        // 创建相机绑定组
+        // 创建渲染管线
+        let pipelines = Pipelines::new(renderer.device(), renderer.config());
+
+        // 创建默认立方体贴图
+        let dummy_cubemap = crate::texture::Texture::create_dummy_cubemap(renderer.device(), renderer.queue())
+            .map_err(|_| RenderError::RequestDevice)?;
+
+        // 创建相机绑定组 (包含 IBL)
         let camera_bind_group = renderer
             .device()
             .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("相机及光源绑定组"),
-                layout: &renderer.pipelines.mesh.camera_bind_group_layout,
+                label: Some("相机及 IBL 绑定组"),
+                layout: &pipelines.mesh.camera_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -92,11 +105,51 @@ impl Renderer {
                         binding: 1,
                         resource: light_buffer.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&dummy_cubemap.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&dummy_cubemap.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&dummy_cubemap.sampler),
+                    },
                 ],
             });
 
-        // 创建渲染管线
-        let pipelines = Pipelines::new(renderer.device(), renderer.config());
+        // 天空盒相机绑定组
+        let skybox_camera_bind_group = renderer.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("天空盒相机绑定组"),
+            layout: &pipelines.skybox.camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // 天空盒纹理绑定组 (默认使用 dummy)
+        let skybox_bind_group = renderer.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("天空盒纹理绑定组"),
+            layout: &pipelines.skybox.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&dummy_cubemap.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&dummy_cubemap.sampler),
+                },
+            ],
+        });
+
+        let skybox_texture = crate::texture::Texture::create_dummy_cubemap(renderer.device(), renderer.queue())
+            .map_err(|_| RenderError::RequestDevice)?;
 
         Ok(Self {
             renderer,
@@ -107,7 +160,11 @@ impl Renderer {
             objects: HashMap::new(),
             light_buffer,
             default_texture,
+            dummy_cubemap,
             textures: Vec::new(),
+            skybox_texture,
+            skybox_bind_group,
+            skybox_camera_bind_group,
         })
     }
 
@@ -151,6 +208,67 @@ impl Renderer {
         );
     }
 
+    /// 加载外部 HDR 环境图
+    pub fn load_hdr_environment(&mut self, path: &std::path::Path) -> Result<(), anyhow::Error> {
+        let device = self.renderer.device();
+        let queue = self.renderer.queue();
+
+        // 1. 加载 HDR 2D 纹理
+        let equirect = crate::texture::Texture::from_hdr(device, queue, path)?;
+        
+        // 2. 转换为立方体贴图 (1024x1024)
+        let skybox_texture = crate::texture::Texture::equirectangular_to_cubemap(device, queue, &equirect, 1024)?;
+        
+        // 3. 更新渲染器状态
+        self.skybox_texture = skybox_texture;
+        
+        // 4. 重建天空盒绑定组
+        self.skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("天空盒纹理绑定组 (HDR)"),
+            layout: &self.pipelines.skybox.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.skybox_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.skybox_texture.sampler),
+                },
+            ],
+        });
+
+        // 5. 重建相机/IBL 绑定组
+        self.camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("相机及 IBL 绑定组 (HDR)"),
+            layout: &self.pipelines.mesh.camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.light_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.skybox_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.skybox_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.skybox_texture.sampler),
+                },
+            ],
+        });
+
+        Ok(())
+    }
+
     /// 获取 WGPU 设备
     pub fn device(&self) -> &wgpu::Device {
         self.renderer.device()
@@ -168,39 +286,67 @@ impl Renderer {
 
     /// 渲染场景
     pub fn render_scene(&self, view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
-        // 创建渲染通道
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("渲染通道"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.1,
-                        g: 0.2,
-                        b: 0.3,
-                        a: 1.0,
+        // 1. 天空盒渲染过程
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("天空盒渲染通道"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 1.0,
+                        }),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
                     }),
-                    store: true,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: true,
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-        });
+            });
 
-        // 设置渲染管线和绑定组
-        render_pass.set_pipeline(&self.pipelines.mesh.pipeline);
-        render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_pipeline(&self.pipelines.skybox.pipeline);
+            render_pass.set_bind_group(0, &self.skybox_camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.skybox_bind_group, &[]);
+            render_pass.draw(0..36, 0..1);
+        }
 
-        // 渲染场景对象
-        for object in self.objects.values() {
-            object.render(&mut render_pass);
+        // 2. 网格渲染过程
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("网格渲染通道"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
+            });
+
+            render_pass.set_pipeline(&self.pipelines.mesh.pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+
+            for object in self.objects.values() {
+                object.render(&mut render_pass);
+            }
         }
     }
 
@@ -212,7 +358,18 @@ impl Renderer {
 
         // 2. 将 glTF 网格转换为场景对象
         for gltf_mesh in &model.meshes {
-            let diffuse_texture = self.get_diffuse_texture_for_gltf(&model, gltf_mesh, &image_to_texture);
+            let diffuse_texture = self.get_texture_from_index(&model, gltf_mesh, &image_to_texture, 0); // Diffuse
+            let normal_texture = self.get_texture_from_index(&model, gltf_mesh, &image_to_texture, 1);  // Normal
+            let mr_texture = self.get_texture_from_index(&model, gltf_mesh, &image_to_texture, 2);      // Metallic-Roughness
+
+            // 构造材质标志
+            let mut material_buffer = crate::pipelines::MaterialBuffer::default();
+            if normal_texture as *const _ != &self.default_texture as *const _ {
+                material_buffer.has_normal_texture = 1;
+            }
+            if mr_texture as *const _ != &self.default_texture as *const _ {
+                material_buffer.has_metallic_roughness_texture = 1;
+            }
 
             let scene_object = SceneObject::new(
                 self.renderer.device(),
@@ -220,14 +377,17 @@ impl Renderer {
                     position: v.position.into(),
                     normal: v.normal.into(),
                     uv: v.uv.into(),
+                    tangent: v.tangent.into(),
                 }).collect::<Vec<_>>(),
                 &gltf_mesh.data.indices,
                 self.pipelines.mesh.model_bind_group_layout(),
                 &self.pipelines.mesh.texture_bind_group_layout,
                 &self.pipelines.mesh.material_bind_group_layout,
                 diffuse_texture,
+                normal_texture,
+                mr_texture,
                 gltf_mesh.transform,
-                crate::pipelines::MaterialBuffer::default(),
+                material_buffer,
             );
 
             let id = uuid::Uuid::new_v4();
@@ -257,15 +417,23 @@ impl Renderer {
     }
 
     /// 根据 glTF 模型及网格获取对应的漫反射贴图
-    pub fn get_diffuse_texture_for_gltf<'a>(
+    pub fn get_texture_from_index<'a>(
         &'a self, 
         model: &alander_core::assets::GltfModel, 
         mesh: &alander_core::assets::GltfMesh,
-        image_to_texture: &HashMap<usize, usize>
+        image_to_texture: &HashMap<usize, usize>,
+        texture_type: u32, // 0: Diffuse, 1: Normal, 2: Metallic-Roughness
     ) -> &'a crate::texture::Texture {
         if let Some(mat_idx) = mesh.material_index {
             if let Some(material) = model.materials.get(mat_idx) {
-                if let Some(img_idx_str) = &material.base_color_texture {
+                let img_idx_opt = match texture_type {
+                    0 => material.base_color_texture.as_ref(),
+                    1 => material.normal_texture.as_ref(),
+                    2 => material.metallic_roughness_texture.as_ref(),
+                    _ => None,
+                };
+
+                if let Some(img_idx_str) = img_idx_opt {
                     if let Ok(img_idx) = img_idx_str.parse::<usize>() {
                         if let Some(&texture_idx) = image_to_texture.get(&img_idx) {
                             return &self.textures[texture_idx];
@@ -341,7 +509,7 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth24Plus,
+            format: crate::texture::Texture::DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
@@ -400,126 +568,150 @@ pub fn create_cube(
             position: [-0.5, -0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, -0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [-0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         // 后面
         Vertex {
             position: [-0.5, -0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [0.0, 0.0],
+            tangent: [-1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, -0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [1.0, 0.0],
+            tangent: [-1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, 0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [1.0, 1.0],
+            tangent: [-1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [-0.5, 0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [0.0, 1.0],
+            tangent: [-1.0, 0.0, 0.0, 1.0],
         },
         // 左面
         Vertex {
             position: [-0.5, -0.5, -0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [0.0, 0.0],
+            tangent: [0.0, 0.0, 1.0, 1.0],
         },
         Vertex {
             position: [-0.5, -0.5, 0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [1.0, 0.0],
+            tangent: [0.0, 0.0, 1.0, 1.0],
         },
         Vertex {
             position: [-0.5, 0.5, 0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [1.0, 1.0],
+            tangent: [0.0, 0.0, 1.0, 1.0],
         },
         Vertex {
             position: [-0.5, 0.5, -0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [0.0, 1.0],
+            tangent: [0.0, 0.0, 1.0, 1.0],
         },
         // 右面
         Vertex {
             position: [0.5, -0.5, 0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [0.0, 0.0],
+            tangent: [0.0, 0.0, -1.0, 1.0],
         },
         Vertex {
             position: [0.5, -0.5, -0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [1.0, 0.0],
+            tangent: [0.0, 0.0, -1.0, 1.0],
         },
         Vertex {
             position: [0.5, 0.5, -0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [1.0, 1.0],
+            tangent: [0.0, 0.0, -1.0, 1.0],
         },
         Vertex {
             position: [0.5, 0.5, 0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [0.0, 1.0],
+            tangent: [0.0, 0.0, -1.0, 1.0],
         },
         // 上面
         Vertex {
             position: [-0.5, 0.5, 0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, 0.5, 0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, 0.5, -0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [-0.5, 0.5, -0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         // 下面
         Vertex {
             position: [-0.5, -0.5, -0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, -0.5, -0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.5, -0.5, 0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [-0.5, -0.5, 0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
     ];
 
@@ -543,6 +735,8 @@ pub fn create_cube(
         texture_bind_group_layout,
         material_bind_group_layout,
         diffuse_texture,
+        diffuse_texture, // Normal dummy
+        diffuse_texture, // MR dummy
         glam::Mat4::IDENTITY,
         crate::pipelines::MaterialBuffer::default(),
     )

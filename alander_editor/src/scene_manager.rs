@@ -73,6 +73,7 @@ impl Scene {
                         position: v.position.to_array(),
                         normal: v.normal.to_array(),
                         uv: v.uv.to_array(),
+                        tangent: v.tangent.to_array(),
                     }
                 }).collect();
 
@@ -83,6 +84,8 @@ impl Scene {
                     &renderer.pipelines().mesh.model_bind_group_layout,
                     &renderer.pipelines().mesh.texture_bind_group_layout,
                     &renderer.pipelines().mesh.material_bind_group_layout,
+                    renderer.default_texture(),
+                    renderer.default_texture(),
                     renderer.default_texture(),
                     glam::Mat4::IDENTITY,
                     MaterialBuffer::default(),
@@ -214,7 +217,18 @@ impl Scene {
                         let sub_name = asset_path.sub_asset.as_deref().unwrap_or("");
                         if let Some(gltf_mesh) = model.meshes.iter().find(|m| m.data.name == sub_name || sub_name.is_empty()) {
                             // 获取对应的纹理
-                            let diffuse_texture = renderer.get_diffuse_texture_for_gltf(model, gltf_mesh, texture_map);
+                            let diffuse_texture = renderer.get_texture_from_index(model, gltf_mesh, texture_map, 0);
+                            let normal_texture = renderer.get_texture_from_index(model, gltf_mesh, texture_map, 1);
+                            let mr_texture = renderer.get_texture_from_index(model, gltf_mesh, texture_map, 2);
+
+                            // 构造材质标志
+                            let mut material_buffer = MaterialBuffer::default();
+                            if normal_texture as *const _ != renderer.default_texture() as *const _ {
+                                material_buffer.has_normal_texture = 1;
+                            }
+                            if mr_texture as *const _ != renderer.default_texture() as *const _ {
+                                material_buffer.has_metallic_roughness_texture = 1;
+                            }
 
                             // 将此网格数据转换并添加到渲染器
                             let render_vertices: Vec<Vertex> = gltf_mesh.data.vertices.iter().map(|v| {
@@ -222,6 +236,7 @@ impl Scene {
                                     position: v.position.to_array(),
                                     normal: v.normal.to_array(),
                                     uv: v.uv.to_array(),
+                                    tangent: v.tangent.to_array(),
                                 }
                             }).collect();
 
@@ -233,8 +248,10 @@ impl Scene {
                                 &renderer.pipelines().mesh.texture_bind_group_layout,
                                 &renderer.pipelines().mesh.material_bind_group_layout,
                                 diffuse_texture,
+                                normal_texture,
+                                mr_texture,
                                 glam::Mat4::IDENTITY,
-                                MaterialBuffer::default(),
+                                material_buffer,
                             );
                             let render_uuid = uuid::Uuid::new_v4();
                             renderer.add_object(render_uuid, scene_object);

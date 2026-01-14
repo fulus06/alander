@@ -197,6 +197,7 @@ pub mod scene {
         pub position: Vec3,
         pub normal: Vec3,
         pub uv: Vec2,
+        pub tangent: Vec4, // 切线 (含副切线符号)
     }
 
     impl Vertex {
@@ -206,6 +207,17 @@ pub mod scene {
                 position,
                 normal,
                 uv,
+                tangent: Vec4::new(1.0, 0.0, 0.0, 1.0), // 默认切线
+            }
+        }
+
+        /// 创建带切线的顶点
+        pub fn with_tangent(position: Vec3, normal: Vec3, uv: Vec2, tangent: Vec4) -> Self {
+            Self {
+                position,
+                normal,
+                uv,
+                tangent,
             }
         }
     }

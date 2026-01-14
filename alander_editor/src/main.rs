@@ -505,8 +505,9 @@ impl AlanderApp {
                     base_color: m.base_color.into(),
                     metallic: m.metallic,
                     roughness: m.roughness,
-                    _padding: [0.0; 2],
-                    emissive: [m.emissive.x, m.emissive.y, m.emissive.z, 0.0],
+                    has_normal_texture: 0,
+                    has_metallic_roughness_texture: 0,
+                    emissive: [m.emissive.x, m.emissive.y, m.emissive.z, 1.0],
                 });
 
                 self.renderer.update_object_model_material(&render_id.0, cg_matrix, render_mat);
@@ -629,6 +630,10 @@ impl AlanderApp {
                     ui.separator();
                     if ui.button("导入模型 (glTF)").clicked() {
                         self.on_import_model();
+                        ui.close_menu();
+                    }
+                    if ui.button("导入环境贴图 (HDR)").clicked() {
+                        self.on_import_hdr_environment();
                         ui.close_menu();
                     }
                     ui.separator();
@@ -918,6 +923,21 @@ impl AlanderApp {
                 Err(e) => {
                     tracing::error!("加载 glTF 失败: {}", e);
                 }
+            }
+        }
+    }
+
+    /// 导入 HDR 环境回归回调
+    fn on_import_hdr_environment(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("HDR 环境贴图", &["hdr"])
+            .pick_file()
+        {
+            tracing::info!("正在加载库 HDR 环境贴图: {:?}", path);
+            if let Err(e) = self.renderer.load_hdr_environment(&path) {
+                tracing::error!("加载 HDR 环境贴图失败: {}", e);
+            } else {
+                tracing::info!("成功加载 HDR 环境贴图");
             }
         }
     }
