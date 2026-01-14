@@ -515,13 +515,72 @@ impl AlanderApp {
             .resizable(true)
             .default_width(250.0)
             .show(ctx, |ui| {
-                ui.heading("实体属性");
+                ui.heading("属性面板");
                 ui.separator();
-                if let Some(id) = self.editor_state.selected_entity {
-                    ui.label(format!("实体 ID: {:?}", id));
-    // 更多属性编辑...
+                
+                if let Some(entity) = self.editor_state.selected_entity {
+                    if let Some(mut scene) = self.scene_manager.active_scene_mut() {
+                        let mut name_query = scene.world.query::<&alander_core::scene::Name>();
+                        if let Ok(name) = name_query.get(&scene.world, entity) {
+                            ui.horizontal(|ui| {
+                                ui.label("名称:");
+                                ui.strong(&name.0);
+                            });
+                        }
+                        
+                        ui.label(format!("实体 ID: {:?}", entity));
+                        ui.separator();
+                        
+                        // Transform 编辑
+                        let mut transform_query = scene.world.query::<&mut alander_core::scene::Transform>();
+                        if let Ok(mut transform) = transform_query.get_mut(&mut scene.world, entity) {
+                            ui.collapsing("变换 (Transform)", |ui| {
+                                ui.label("位置");
+                                ui.horizontal(|ui| {
+                                    ui.label("X"); ui.add(egui::DragValue::new(&mut transform.position.x).speed(0.1));
+                                    ui.label("Y"); ui.add(egui::DragValue::new(&mut transform.position.y).speed(0.1));
+                                    ui.label("Z"); ui.add(egui::DragValue::new(&mut transform.position.z).speed(0.1));
+                                });
+                                
+                                ui.label("缩放");
+                                ui.horizontal(|ui| {
+                                    ui.label("X"); ui.add(egui::DragValue::new(&mut transform.scale.x).speed(0.01));
+                                    ui.label("Y"); ui.add(egui::DragValue::new(&mut transform.scale.y).speed(0.01));
+                                    ui.label("Z"); ui.add(egui::DragValue::new(&mut transform.scale.z).speed(0.01));
+                                });
+                                
+                                ui.label("旋转 (Euler)");
+                                let (mut yaw, mut pitch, mut roll) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                                yaw = yaw.to_degrees();
+                                pitch = pitch.to_degrees();
+                                roll = roll.to_degrees();
+                                
+                                let mut changed = false;
+                                ui.horizontal(|ui| {
+                                    ui.label("Y"); if ui.add(egui::DragValue::new(&mut yaw).speed(1.0)).changed() { changed = true; }
+                                    ui.label("X"); if ui.add(egui::DragValue::new(&mut pitch).speed(1.0)).changed() { changed = true; }
+                                    ui.label("Z"); if ui.add(egui::DragValue::new(&mut roll).speed(1.0)).changed() { changed = true; }
+                                });
+                                
+                                if changed {
+                                    transform.rotation = glam::Quat::from_euler(
+                                        glam::EulerRot::YXZ,
+                                        yaw.to_radians(),
+                                        pitch.to_radians(),
+                                        roll.to_radians()
+                                    );
+                                }
+
+                                if ui.button("重置变换").clicked() {
+                                    *transform = alander_core::scene::Transform::default();
+                                }
+                            });
+                        }
+                    }
                 } else {
-                    ui.label("未选中实体");
+                    ui.vertical_centered(|ui| {
+                        ui.label("未选中任何实体");
+                    });
                 }
             });
 
