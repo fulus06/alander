@@ -229,8 +229,10 @@ impl AlanderApp {
     /// 处理输入事件
     fn handle_input(&mut self, event: &winit::event::WindowEvent) {
         // 先让 EGUI 处理事件
-        let _res = self.egui_state.on_event(&self.egui_context, event);
+        let egui_res = self.egui_state.on_event(&self.egui_context, event);
 
+        // 如果 EGUI 消耗了事件（如点击了按钮），我们通常不处理 3D 逻辑
+        // 但对于某些事件（如 CursorMoved），我们可能仍然需要更新内部状态
         match event {
             WindowEvent::Resized(size) => {
                 self.renderer.resize(*size);
@@ -254,10 +256,8 @@ impl AlanderApp {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.input.mouse_buttons.insert(*button, *state);
                 
-                // 检查 EGUI 是否想要处理指针事件
-                let wants_pointer = self.egui_context.wants_pointer_input();
-
-                if !wants_pointer {
+                // 只有当 EGUI 没有消耗该点击事件时，才开始轨道相机操作
+                if !egui_res.consumed {
                     // 使用右键进行轨道旋转
                     if *button == winit::event::MouseButton::Right {
                         self.editor_state.orbit_controller.is_dragging =
@@ -265,6 +265,9 @@ impl AlanderApp {
                         if *state == winit::event::ElementState::Pressed {
                             self.editor_state.orbit_controller.last_mouse_pos =
                                 (self.input.mouse_position.x, self.input.mouse_position.y);
+                            tracing::info!("开始相机旋转拖拽");
+                        } else {
+                            tracing::info!("停止相机旋转拖拽");
                         }
                     }
                 }
@@ -297,23 +300,23 @@ impl AlanderApp {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if !self.egui_context.wants_pointer_input() {
-                    self.input.mouse_scroll_delta = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(x, y) => glam::Vec2::new(*x, *y),
-                        winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                            glam::Vec2::new(pos.x as f32, pos.y as f32)
-                        }
+                // 如果鼠标当前不在 EGUI 阻挡区域（或 EGUI 未消耗滚轮事件）
+                if !egui_res.consumed {
+                    // 更新轨道控制器距离
+                    let zoom_speed = (self.editor_state.orbit_controller.distance * 0.2).max(1.0);
+                    let scroll_y = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => *y * 2.0, // 增加线滚动增益
+                        winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1, // 增加像素增益
                     };
 
-                    // 更新轨道控制器距离
-                    self.editor_state.orbit_controller.distance -=
-                        self.input.mouse_scroll_delta.y * 0.1;
+                    self.editor_state.orbit_controller.distance -= scroll_y * zoom_speed;
                     self.editor_state.orbit_controller.distance = self
                         .editor_state
                         .orbit_controller
                         .distance
-                        .clamp(0.5, 100.0);
+                        .clamp(0.1, 2000.0);
 
+                    tracing::info!("相机缩放: 距离 = {:.2}", self.editor_state.orbit_controller.distance);
                     self.update_camera_transform();
                 }
             }
