@@ -14,42 +14,7 @@ pub mod math {
 }
 
 /// 资源系统
-pub mod assets {
-    use super::*;
-    use std::sync::Arc;
-
-    /// 唯一资源标识符
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    pub struct Handle<T> {
-        pub id: u64,
-        _phantom: std::marker::PhantomData<T>,
-    }
-
-    impl<T> Handle<T> {
-        pub fn new(id: u64) -> Self {
-            Self {
-                id,
-                _phantom: std::marker::PhantomData,
-            }
-        }
-    }
-
-    /// 资源加载器特征
-    pub trait AssetLoader<T> {
-        fn load(&mut self, source: &str) -> Result<T, AssetError>;
-    }
-
-    /// 资源错误
-    #[derive(Debug, thiserror::Error)]
-    pub enum AssetError {
-        #[error("IO错误: {0}")]
-        Io(#[from] std::io::Error),
-        #[error("解析错误: {0}")]
-        Parse(String),
-        #[error("资源未找到: {0}")]
-        NotFound(String),
-    }
-}
+pub mod assets;
 
 /// 场景系统
 pub mod scene {
@@ -347,4 +312,64 @@ pub mod events {
             new_material: super::scene::Material,
         },
     }
+}
+
+/// 测试ECS和资源管理功能
+#[cfg(feature = "test")]
+pub fn test_ecs_and_assets() {
+    use bevy_ecs::prelude::*;
+    use glam::Vec3;
+    
+    println!("=== 开始ECS和资源管理功能测试 ===");
+    
+    // 1. 创建世界和实体
+    let mut world = World::new();
+    let entity = world.spawn((
+        scene::Name("测试实体".to_string()),
+        scene::Transform::from_translation(Vec3::new(1.0, 2.0, 3.0)),
+    )).id();
+    
+    println!("✅ 创建的实体ID: {:?}", entity);
+    
+    // 2. 验证实体组件
+    let name = world.get::<scene::Name>(entity).unwrap();
+    println!("✅ 实体名称: {}", name.0);
+    
+    let transform = world.get::<scene::Transform>(entity).unwrap();
+    println!("✅ 实体变换: position={:?}", transform.position);
+    
+    // 3. 创建资源管理器并加载资源
+    let mut mesh_manager = assets::AssetManager::<scene::MeshData>::new();
+    
+    // 创建测试网格数据
+    let test_mesh = scene::MeshData {
+        vertices: vec![
+            scene::Vertex::new(Vec3::ZERO, Vec3::Z, Vec2::ZERO),
+            scene::Vertex::new(Vec3::X, Vec3::Z, Vec2::X),
+            scene::Vertex::new(Vec3::Y, Vec3::Z, Vec2::Y),
+        ],
+        indices: vec![0, 1, 2],
+    };
+    
+    let mesh_handle = mesh_manager.load(test_mesh);
+    println!("✅ 加载的网格句柄ID: {}", mesh_handle.id);
+    
+    // 4. 验证资源加载
+    assert!(mesh_manager.contains(&mesh_handle));
+    let loaded_mesh = mesh_manager.get(&mesh_handle);
+    assert!(loaded_mesh.is_some());
+    println!("✅ 资源加载验证成功!");
+    
+    // 5. 测试资源加载器
+    let mut mesh_loader = assets::SimpleMeshLoader;
+    let mesh_result = mesh_loader.load("cube");
+    assert!(mesh_result.is_ok());
+    println!("✅ 网格加载器测试成功!");
+    
+    let mut material_loader = assets::SimpleMaterialLoader;
+    let material_result = material_loader.load("default");
+    assert!(material_result.is_ok());
+    println!("✅ 材质加载器测试成功!");
+    
+    println!("=== ECS和资源管理功能测试完成 ===");
 }

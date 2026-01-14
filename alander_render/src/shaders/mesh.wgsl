@@ -42,17 +42,25 @@ fn vs_main(
     return out;
 }
 
+@group(2) @binding(0)
+var t_diffuse: texture_2d<f32>;
+@group(2) @binding(1)
+var s_diffuse: sampler;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // 简化的朗伯光照模型
-    let albedo = vec3<f32>(0.8, 0.3, 0.2); // 基础颜色
+    // 获取纹理采样结果
+    let object_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.uv);
+    
+    // 朗伯光照模型
+    let albedo = object_color.rgb;
 
     // 简单的方向光
     let light_dir = normalize(vec3<f32>(1.0, 1.0, 0.5));
     let n = normalize(in.world_normal);
 
     // 环境光
-    let ambient = vec3<f32>(0.1);
+    let ambient = vec3<f32>(0.1) * albedo;
 
     // 漫反射
     let diff = max(dot(n, light_dir), 0.0);
@@ -61,5 +69,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // 组合颜色
     let color = ambient + diffuse;
 
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(color, object_color.a);
 }

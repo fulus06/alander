@@ -10,13 +10,12 @@ use cgmath::{Matrix4, Point3, Vector3};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
+use image;
 
 /// 渲染器
 pub struct Renderer {
     /// WGPU 渲染器实例
     renderer: super::Renderer,
-    /// 深度纹理
-    depth_texture: wgpu::Texture,
     /// 深度纹理视图
     depth_view: wgpu::TextureView,
     /// 相机缓冲区
@@ -27,6 +26,10 @@ pub struct Renderer {
     pipelines: Pipelines,
     /// 场景对象
     objects: HashMap<uuid::Uuid, SceneObject>,
+    // 默认纹理
+    default_texture: crate::texture::Texture,
+    // 纹理集
+    textures: Vec<crate::texture::Texture>,
 }
 
 impl Renderer {
@@ -34,8 +37,17 @@ impl Renderer {
     pub async fn new(window: &Window) -> Result<Self, RenderError> {
         let renderer = super::Renderer::new(window, super::RendererConfig::default()).await?;
 
+        // 创建白色的 1x1 默认纹理
+        let default_img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255])));
+        let default_texture = crate::texture::Texture::from_image(
+            renderer.device(),
+            renderer.queue(),
+            &default_img,
+            Some("默认白纹理")
+        ).map_err(|_| RenderError::RequestDevice)?; // Reuse error for simplicity
+
         // 创建深度纹理
-        let (depth_texture, depth_view) =
+        let depth_view =
             Self::create_depth_texture(renderer.device(), renderer.config(), "深度纹理");
 
         // 创建相机缓冲区
@@ -79,12 +91,13 @@ impl Renderer {
 
         Ok(Self {
             renderer,
-            depth_texture,
             depth_view,
             camera_buffer,
             camera_bind_group,
             pipelines,
             objects: HashMap::new(),
+            default_texture,
+            textures: Vec::new(),
         })
     }
 
@@ -93,9 +106,8 @@ impl Renderer {
         self.renderer.resize(new_size);
 
         // 重新创建深度纹理
-        let (depth_texture, depth_view) =
+        let depth_view =
             Self::create_depth_texture(self.renderer.device(), self.renderer.config(), "深度纹理");
-        self.depth_texture = depth_texture;
         self.depth_view = depth_view;
     }
 
@@ -120,34 +132,28 @@ impl Renderer {
         &self.pipelines
     }
 
-    /// 更新对象模型矩阵
-    pub fn update_object_model(&mut self, object_id: &uuid::Uuid, model: cgmath::Matrix4<f32>) {
-        // 调试信息：模型更新
-        // tracing::debug!("更新对象模型矩阵: {:?}", object_id);
-        if let Some(object) = self.objects.get_mut(object_id) {
-            object.update_model(self.renderer.queue(), model);
-        }
+    /// 获取 WGPU 设备
+    pub fn device(&self) -> &wgpu::Device {
+        self.renderer.device()
     }
 
-    /// 渲染
-    pub fn render(&mut self) -> Result<(), RenderError> {
-        let output = self.renderer.surface().get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+    /// 获取 WGPU 队列
+    pub fn queue(&self) -> &wgpu::Queue {
+        self.renderer.queue()
+    }
 
-        let mut encoder =
-            self.renderer
-                .device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("渲染编码器"),
-                });
+    /// 获取默认纹理
+    pub fn default_texture(&self) -> &crate::texture::Texture {
+        &self.default_texture
+    }
 
+    /// 渲染场景
+    pub fn render_scene(&self, view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
         // 创建渲染通道
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("渲染通道"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
+                view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -177,19 +183,72 @@ impl Renderer {
         for object in self.objects.values() {
             object.render(&mut render_pass);
         }
+    }
 
-        // 结束渲染通道
-        drop(render_pass);
+    /// 添加 glTF 模型
+    pub fn add_gltf_model(&mut self, model: alander_core::assets::GltfModel) -> Vec<uuid::Uuid> {
+        let mut image_to_texture = std::collections::HashMap::new();
+        
+        // 1. 加载所有图像作为 WGPU 纹理
+        for (i, img) in model.images.into_iter().enumerate() {
+            if let Ok(texture) = crate::texture::Texture::from_image(
+                self.renderer.device(),
+                self.renderer.queue(),
+                &img,
+                Some(&format!("glTF 纹理 {}", i)),
+            ) {
+                image_to_texture.insert(i, self.textures.len());
+                self.textures.push(texture);
+            }
+        }
 
-        // 提交命令
-        self.renderer
-            .queue()
-            .submit(std::iter::once(encoder.finish()));
+        let mut object_ids = Vec::new();
 
-        // 呈现
-        output.present();
+        // 2. 将 glTF 网格转换为场景对象
+        for gltf_mesh in model.meshes {
+            // 获取材质绑定的纹理
+            let diffuse_texture = if let Some(mat_idx) = gltf_mesh.material_index {
+                if let Some(material) = model.materials.get(mat_idx) {
+                    if let Some(img_idx_str) = &material.base_color_texture {
+                        if let Ok(img_idx) = img_idx_str.parse::<usize>() {
+                            if let Some(&texture_idx) = image_to_texture.get(&img_idx) {
+                                &self.textures[texture_idx]
+                            } else {
+                                &self.default_texture
+                            }
+                        } else {
+                            &self.default_texture
+                        }
+                    } else {
+                        &self.default_texture
+                    }
+                } else {
+                    &self.default_texture
+                }
+            } else {
+                &self.default_texture
+            };
 
-        Ok(())
+            let scene_object = SceneObject::new(
+                self.renderer.device(),
+                &gltf_mesh.data.vertices.iter().map(|v| crate::pipelines::Vertex {
+                    position: v.position.into(),
+                    normal: v.normal.into(),
+                    uv: v.uv.into(),
+                }).collect::<Vec<_>>(),
+                &gltf_mesh.data.indices,
+                self.pipelines.mesh.model_bind_group_layout(),
+                &self.pipelines.mesh.texture_bind_group_layout,
+                diffuse_texture,
+                gltf_mesh.transform,
+            );
+
+            let id = uuid::Uuid::new_v4();
+            self.objects.insert(id, scene_object);
+            object_ids.push(id);
+        }
+
+        object_ids
     }
 
     /// 添加场景对象
@@ -204,14 +263,31 @@ impl Renderer {
         self.objects.remove(id)
     }
 
-    /// 获取设备
-    pub fn device(&self) -> &wgpu::Device {
-        self.renderer.device()
+    /// 获取表面
+    pub fn surface(&self) -> &wgpu::Surface {
+        self.renderer.surface()
     }
 
-    /// 获取队列
-    pub fn queue(&self) -> &wgpu::Queue {
-        self.renderer.queue()
+    /// 获取配置
+    pub fn config(&self) -> &wgpu::SurfaceConfiguration {
+        self.renderer.config()
+    }
+
+    /// 获取表面格式
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.renderer.format()
+    }
+
+    /// 获取窗口大小
+    pub fn size(&self) -> winit::dpi::PhysicalSize<u32> {
+        self.renderer.size()
+    }
+
+    /// 更新对象模型矩阵
+    pub fn update_object_model(&mut self, object_id: &uuid::Uuid, model: cgmath::Matrix4<f32>) {
+        if let Some(object) = self.objects.get_mut(object_id) {
+            object.update_model(self.renderer.queue(), model);
+        }
     }
 
     /// 创建深度纹理
@@ -219,13 +295,13 @@ impl Renderer {
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
         label: &str,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
+    ) -> wgpu::TextureView {
         let size = wgpu::Extent3d {
             width: config.width,
             height: config.height,
             depth_or_array_layers: 1,
         };
-        let descriptor = wgpu::TextureDescriptor {
+        let desc = wgpu::TextureDescriptor {
             label: Some(label),
             size,
             mip_level_count: 1,
@@ -236,9 +312,9 @@ impl Renderer {
             view_formats: &[],
         };
 
-        let texture = device.create_texture(&descriptor);
+        let texture = device.create_texture(&desc);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
+        view
     }
 
     /// 计算视图矩阵
@@ -276,10 +352,11 @@ impl Renderer {
     }
 }
 
-/// 创建示例立方体
 pub fn create_cube(
     device: &wgpu::Device,
     model_bind_group_layout: &wgpu::BindGroupLayout,
+    texture_bind_group_layout: &wgpu::BindGroupLayout,
+    diffuse_texture: &crate::texture::Texture,
 ) -> SceneObject {
     // 立方体顶点数据
     let vertices = &[
@@ -423,5 +500,14 @@ pub fn create_cube(
     ];
 
     // 创建场景对象
-    SceneObject::new(device, vertices, indices, model_bind_group_layout)
+    SceneObject::new(
+        device,
+        vertices,
+        indices,
+        model_bind_group_layout,
+        texture_bind_group_layout,
+        diffuse_texture,
+        glam::Mat4::IDENTITY,
+    )
 }
+

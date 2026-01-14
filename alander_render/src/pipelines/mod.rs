@@ -6,6 +6,14 @@ use crate::utils;
 use cgmath::SquareMatrix;
 use wgpu::util::DeviceExt;
 
+#[rustfmt::skip]
+pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 0.5, 0.0,
+    0.0, 0.0, 0.5, 1.0,
+);
+
 /// 管线集合
 pub struct Pipelines {
     /// 基础网格管线
@@ -26,6 +34,7 @@ pub struct MeshPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub model_bind_group_layout: wgpu::BindGroupLayout,
+    pub texture_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl MeshPipeline {
@@ -61,7 +70,6 @@ impl MeshPipeline {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("模型绑定组布局"),
                 entries: &[
-                    // 模型变换绑定
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -75,10 +83,38 @@ impl MeshPipeline {
                 ],
             });
 
+        // 纹理绑定组布局
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("纹理绑定组布局"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
         // 管线布局
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("网格管线布局"),
-            bind_group_layouts: &[&camera_bind_group_layout, &model_bind_group_layout],
+            bind_group_layouts: &[
+                &camera_bind_group_layout,
+                &model_bind_group_layout,
+                &texture_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
 
@@ -131,6 +167,7 @@ impl MeshPipeline {
             pipeline,
             camera_bind_group_layout,
             model_bind_group_layout,
+            texture_bind_group_layout,
         }
     }
 }
@@ -185,7 +222,7 @@ pub struct CameraBuffer {
 impl CameraBuffer {
     /// 从视图和投影矩阵创建相机缓冲区
     pub fn new(view: cgmath::Matrix4<f32>, proj: cgmath::Matrix4<f32>, position: [f32; 3]) -> Self {
-        let view_proj = proj * view;
+        let view_proj = OPENGL_TO_WGPU_MATRIX * proj * view;
         Self {
             view_proj: view_proj.into(),
             position,
@@ -297,6 +334,7 @@ pub struct SceneObject {
     pub num_elements: u32,
     pub model_buffer: wgpu::Buffer,
     pub model_bind_group: wgpu::BindGroup,
+    pub texture_bind_group: wgpu::BindGroup,
 }
 
 impl SceneObject {
@@ -306,6 +344,9 @@ impl SceneObject {
         vertices: &[Vertex],
         indices: &[u32],
         model_bind_group_layout: &wgpu::BindGroupLayout,
+        texture_bind_group_layout: &wgpu::BindGroupLayout,
+        diffuse_texture: &crate::texture::Texture,
+        transform: glam::Mat4,
     ) -> Self {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("顶点缓冲区"),
@@ -319,10 +360,14 @@ impl SceneObject {
         });
         let num_elements = indices.len() as u32;
 
+        // 转换 glam::Mat4 到 [f32; 16] 供 bytemuck 使用
+        let transform_array: [[f32; 4]; 4] = transform.to_cols_array_2d();
+        let matrix = cgmath::Matrix4::from(transform_array);
+
         // 创建模型缓冲区
         let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("模型缓冲区"),
-            contents: bytemuck::bytes_of(&ModelBuffer::new(cgmath::Matrix4::identity())),
+            contents: bytemuck::bytes_of(&ModelBuffer::new(matrix)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -336,12 +381,29 @@ impl SceneObject {
             }],
         });
 
+        // 创建纹理绑定组
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("纹理绑定组"),
+            layout: texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                },
+            ],
+        });
+
         Self {
             vertex_buffer,
             index_buffer,
             num_elements,
             model_buffer,
             model_bind_group,
+            texture_bind_group,
         }
     }
 
@@ -356,6 +418,7 @@ impl SceneObject {
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.set_bind_group(1, &self.model_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.texture_bind_group, &[]);
         render_pass.draw_indexed(0..self.num_elements, 0, 0..1);
     }
 }

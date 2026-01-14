@@ -12,11 +12,14 @@ path = "src/main.rs"
 alander_core = { path = "../alander_core" }
 alander_render = { path = "../alander_render" }
 
+# ECS框架
+bevy_ecs = { workspace = true }
+
 # UI框架
 egui = { workspace = true }
 egui_dock = { workspace = true }
-egui-winit = "0.33.3"
-egui_wgpu_backend = "0.33.0"
+egui-winit = "0.23"
+egui-wgpu = "0.23"
 
 # 窗口和输入
 winit = { workspace = true }
@@ -42,6 +45,7 @@ bytemuck = "1.4"
 cgmath = "0.18"
 pollster = "0.3"
 uuid = { version = "1.4", features = ["v4", "serde"] }
+rfd = "0.12"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { workspace = true }

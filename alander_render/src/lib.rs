@@ -12,7 +12,7 @@ use winit::{
 pub mod pipelines;
 pub mod renderer;
 // pub mod shaders; // 暂时移除，后续添加
-// pub mod texture; // 暂时移除，后续添加
+pub mod texture;
 pub mod utils;
 
 /// 渲染错误类型
