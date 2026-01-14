@@ -99,7 +99,7 @@ impl AlanderApp {
         info!("正在初始化 Alander 编辑器...");
 
         // 创建渲染器
-        let renderer = Renderer::new(&window).await?;
+        let mut renderer = Renderer::new(&window).await?;
 
         // 创建 EGUI 渲染通道（暂时移除）
         let egui_rpass = None;
@@ -138,7 +138,7 @@ impl AlanderApp {
 
         // 创建场景管理器并添加测试场景
         let mut scene_manager = SceneManager::new();
-        scene_manager.create_test_scene();
+        scene_manager.create_test_scene(&mut renderer);
 
         // 初始化EGUI
         let egui_context = egui::Context::default();
@@ -350,6 +350,23 @@ impl AlanderApp {
 
     /// 更新
     fn update(&mut self, delta_time: f32) {
+        // 同步 ECS 中的 Transform 到渲染器中的模型矩阵
+        if let Some(scene) = self.scene_manager.active_scene_mut() {
+            let mut query = scene.world.query::<(&alander_core::scene::Transform, &alander_core::scene::RenderId)>();
+            for (transform, render_id) in query.iter(&scene.world) {
+                let matrix = transform.compute_matrix();
+                // 将 glam::Mat4 转换为 cgmath::Matrix4
+                let m = matrix.to_cols_array_2d();
+                let cg_matrix = cgmath::Matrix4::new(
+                    m[0][0], m[0][1], m[0][2], m[0][3],
+                    m[1][0], m[1][1], m[1][2], m[1][3],
+                    m[2][0], m[2][1], m[2][2], m[2][3],
+                    m[3][0], m[3][1], m[3][2], m[3][3],
+                );
+                self.renderer.update_object_model(&render_id.0, cg_matrix);
+            }
+        }
+        
         // 更新时间
         self.time.delta = delta_time;
         self.time.elapsed += delta_time;

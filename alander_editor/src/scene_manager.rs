@@ -2,7 +2,8 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Material, Name};
+use alander_core::scene::{Transform, Mesh, Material, Name, RenderId};
+use alander_render::renderer::{Renderer, create_cube};
 use alander_core::assets::{AssetManager, AssetLoader, SimpleMeshLoader, SimpleMaterialLoader};
 use bevy_ecs::prelude::*;
 use glam::Vec3;
@@ -56,11 +57,25 @@ impl Scene {
         self.world.entities().len() as usize
     }
     
-    /// 加载网格资源
-    pub fn load_mesh(&mut self, source: &str) -> Result<alander_core::assets::Handle<alander_core::scene::MeshData>, String> {
+    /// 加载网格资源并添加到渲染器
+    pub fn load_mesh(&mut self, renderer: &mut Renderer, source: &str) -> Result<(alander_core::assets::Handle<alander_core::scene::MeshData>, RenderId), String> {
         let mut loader = SimpleMeshLoader;
         match loader.load(source) {
-            Ok(mesh_data) => Ok(self.mesh_manager.load(mesh_data)),
+            Ok(mesh_data) => {
+                let handle = self.mesh_manager.load(mesh_data.clone());
+                
+                // 将网格直接添加到渲染器
+                let scene_object = create_cube(
+                    renderer.device(),
+                    &renderer.pipelines().mesh.model_bind_group_layout,
+                    &renderer.pipelines().mesh.texture_bind_group_layout,
+                    renderer.default_texture(),
+                );
+                let render_uuid = uuid::Uuid::new_v4();
+                renderer.add_object(render_uuid, scene_object);
+                
+                Ok((handle, RenderId(render_uuid)))
+            },
             Err(e) => Err(format!("网格加载失败: {}", e)),
         }
     }
@@ -170,36 +185,55 @@ impl SceneManager {
     }
     
     /// 创建测试场景
-    pub fn create_test_scene(&mut self) -> SceneHandle {
+    pub fn create_test_scene(&mut self, renderer: &mut Renderer) -> SceneHandle {
         let handle = self.create_scene("测试场景");
         
         if let Some(scene) = self.active_scene_mut() {
             // 创建地面实体
+            let ground_object = create_cube(
+                renderer.device(),
+                &renderer.pipelines().mesh.model_bind_group_layout,
+                &renderer.pipelines().mesh.texture_bind_group_layout,
+                renderer.default_texture(),
+            );
+            let ground_uuid = uuid::Uuid::new_v4();
+            renderer.add_object(ground_uuid, ground_object);
+
             scene.create_entity((
                 Name("地面".to_string()),
-                Transform::from_translation(Vec3::new(0.0, -1.0, 0.0)),
+                Transform {
+                    position: glam::Vec3::new(0.0, -1.0, 0.0),
+                    rotation: glam::Quat::IDENTITY,
+                    scale: glam::Vec3::new(10.0, 0.1, 10.0), // 扁平的地面
+                },
+                RenderId(ground_uuid),
             ));
             
             // 创建立方体实体
-            let cube_entity = scene.create_entity((
-                Name("立方体".to_string()),
-                Transform::from_translation(Vec3::new(0.0, 0.5, 0.0)),
-            ));
-            
-            // 加载网格和材质
-            if let Ok(mesh_handle) = scene.load_mesh("cube") {
-                scene.world.entity_mut(cube_entity).insert(Mesh { handle: mesh_handle });
-            }
-            
-            if let Ok(material_handle) = scene.load_material("red") {
-                scene.world.entity_mut(cube_entity).insert(Material { handle: material_handle });
+            if let Ok((mesh_handle, render_id)) = scene.load_mesh(renderer, "cube") {
+                scene.create_entity((
+                    Name("立方体".to_string()),
+                    Transform::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
+                    Mesh { handle: mesh_handle },
+                    render_id,
+                ));
             }
             
             // 创建更多测试实体
             for i in 0..3 {
+                let cube_object = create_cube(
+                    renderer.device(),
+                    &renderer.pipelines().mesh.model_bind_group_layout,
+                    &renderer.pipelines().mesh.texture_bind_group_layout,
+                    renderer.default_texture(),
+                );
+                let cube_uuid = uuid::Uuid::new_v4();
+                renderer.add_object(cube_uuid, cube_object);
+
                 scene.create_entity((
                     Name(format!("测试实体{}", i)),
-                    Transform::from_translation(Vec3::new((i as f32) * 2.0, 0.0, 0.0)),
+                    Transform::from_translation(glam::Vec3::new((i as f32) * 2.0 + 3.0, 0.5, 0.0)),
+                    RenderId(cube_uuid),
                 ));
             }
         }
