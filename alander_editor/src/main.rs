@@ -317,7 +317,7 @@ impl AlanderApp {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // 如果鼠标在中心视口区域，且 EGUI 没在处理复杂的交互（如滑块），就允许缩放
-                if is_in_viewport && !self.egui_context.is_using_pointer() {
+                if is_in_viewport && !self.egui_context.is_using_pointer() && !self.editor_state.orbit_controller.is_dragging {
                     // 更新轨道控制器距离
                     let zoom_speed = (self.editor_state.orbit_controller.distance * 0.1).max(0.5);
                     let scroll_y = match delta {
