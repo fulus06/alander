@@ -80,6 +80,7 @@ pub enum AssetError {
     UnsupportedFormat(String),
 }
 
+
 /// 测试用的简单网格加载器
 pub struct SimpleMeshLoader;
 
@@ -88,6 +89,7 @@ impl AssetLoader<crate::scene::MeshData> for SimpleMeshLoader {
         // 简化实现：创建默认立方体
         if source == "cube" {
             Ok(crate::scene::MeshData {
+                name: "Cube".to_string(),
                 vertices: vec![
                     crate::scene::Vertex::new(
                         glam::Vec3::new(-0.5, -0.5, -0.5),
@@ -254,6 +256,7 @@ impl GltfLoader {
 
                         all_meshes.push(GltfMesh {
                             data: MeshData {
+                                name: mesh.name().unwrap_or("Unnamed Mesh").to_string(),
                                 vertices: mesh_vertices,
                                 indices: mesh_indices,
                             },
@@ -271,6 +274,7 @@ impl GltfLoader {
             images: converted_images,
         })
     }
+
 
     fn process_node_internal(node: &gltf::Node, parent_transform: glam::Mat4, buffers: &[gltf::buffer::Data], meshes: &mut Vec<GltfMesh>) {
         let (translation, rotation, scale) = node.transform().decomposed();
@@ -314,6 +318,7 @@ impl GltfLoader {
 
                     meshes.push(GltfMesh {
                         data: MeshData {
+                            name: mesh.name().unwrap_or("Unnamed Mesh").to_string(),
                             vertices: mesh_vertices,
                             indices: mesh_indices,
                         },
@@ -344,6 +349,7 @@ mod tests {
         
         // 测试加载资源
         let mesh = MeshData {
+            name: "Test Mesh".to_string(),
             vertices: vec![],
             indices: vec![],
         };

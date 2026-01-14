@@ -100,6 +100,7 @@ pub mod scene {
     /// 网格数据资源
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MeshData {
+        pub name: String,
         pub vertices: Vec<Vertex>,
         pub indices: Vec<u32>,
     }
@@ -155,6 +156,10 @@ pub mod scene {
         pub projection: Projection,
         pub viewport: Viewport,
     }
+
+    /// 渲染对象 ID 组件，用于关联渲染器中的对象
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct RenderId(pub uuid::Uuid);
 
     impl Camera {
         /// 创建透视相机

@@ -70,7 +70,7 @@ struct AlanderApp {
 /// 编辑器状态
 struct EditorState {
     /// 选中的实体
-    selected_entity: Option<uuid::Uuid>,
+    selected_entity: Option<bevy_ecs::entity::Entity>,
     /// 轨道相机控制器
     orbit_controller: OrbitController,
 }
@@ -473,15 +473,22 @@ impl AlanderApp {
             .show(ctx, |ui| {
                 ui.heading("场景管理器");
                 ui.separator();
-                for (handle, name) in self.scene_manager.get_scenes() {
-                    let label = if Some(handle) == self.scene_manager.active_scene().map(|s| &s.handle) {
-                        egui::RichText::new(name).strong().color(egui::Color32::from_rgb(255, 255, 0))
-                    } else {
-                        egui::RichText::new(name)
-                    };
-                    
-                    if ui.selectable_label(false, label).clicked() {
-                        // 切换场景逻辑
+                
+                if let Some(scene) = self.scene_manager.active_scene() {
+                    let entities = scene.get_entities_with_names();
+                    for (entity, name) in entities {
+                        let is_selected = Some(entity) == self.editor_state.selected_entity;
+                        
+                        let label = if is_selected {
+                            egui::RichText::new(format!("{} (E)", name)).strong().color(egui::Color32::from_rgb(255, 255, 0))
+                        } else {
+                            egui::RichText::new(name)
+                        };
+                        
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            self.editor_state.selected_entity = Some(entity);
+                            tracing::info!("选中实体: {:?}", entity);
+                        }
                     }
                 }
             });
@@ -494,8 +501,8 @@ impl AlanderApp {
                 ui.heading("实体属性");
                 ui.separator();
                 if let Some(id) = self.editor_state.selected_entity {
-                    ui.label(format!("UUID: {}", id));
-                    // 更多属性编辑...
+                    ui.label(format!("实体 ID: {:?}", id));
+    // 更多属性编辑...
                 } else {
                     ui.label("未选中实体");
                 }
@@ -522,8 +529,33 @@ impl AlanderApp {
             let loader = alander_core::assets::GltfLoader;
             match loader.load_scene(&path_str) {
                 Ok(model) => {
+                    let _mesh_count = model.meshes.len();
+                    let mesh_names: Vec<String> = model.meshes.iter().map(|m| m.data.name.clone()).collect();
+                    let mesh_transforms: Vec<glam::Mat4> = model.meshes.iter().map(|m| m.transform).collect();
+                    
                     let ids = self.renderer.add_gltf_model(model);
                     tracing::info!("成功加载 glTF，创建了 {} 个渲染对象", ids.len());
+                    
+                    // 在 ECS 中创建对应的实体
+                    if let Some(scene) = self.scene_manager.active_scene_mut() {
+                        for i in 0..ids.len() {
+                            let render_id = ids[i];
+                            let name = mesh_names.get(i).cloned().unwrap_or_else(|| format!("Mesh_{}", i));
+                            let transform_mat = mesh_transforms.get(i).cloned().unwrap_or(glam::Mat4::IDENTITY);
+                            
+                            let (scale, rotation, translation) = transform_mat.to_scale_rotation_translation();
+                            
+                            scene.create_entity((
+                                alander_core::scene::Name(name),
+                                alander_core::scene::Transform {
+                                    position: translation,
+                                    rotation,
+                                    scale,
+                                },
+                                alander_core::scene::RenderId(render_id),
+                            ));
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("加载 glTF 失败: {}", e);
@@ -583,7 +615,7 @@ impl<'a> egui_dock::TabViewer for TabViewer<'a> {
                 ui.heading("实体属性");
                 ui.separator();
                 if let Some(id) = self.app.editor_state.selected_entity {
-                    ui.label(format!("UUID: {}", id));
+                    ui.label(format!("UUID: {:?}", id));
                     // 更多属性编辑...
                 } else {
                     ui.label("未选中实体");
@@ -669,6 +701,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 }
+
 
 /// 用于EGUI的配置
 #[allow(dead_code)]
