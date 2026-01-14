@@ -1,5 +1,5 @@
 use alander_core::{
-    scene::{Camera, Transform, Name, RenderId, BoundingBox},
+    scene::{Camera, Transform, Name, RenderId, BoundingBox, PBRMaterial, PointLight},
     InputState, RenderState, Time,
 };
 use alander_core::math::{Ray, AABB};
@@ -130,6 +130,7 @@ impl AlanderApp {
             renderer.device(),
             &renderer.pipelines().mesh.model_bind_group_layout,
             &renderer.pipelines().mesh.texture_bind_group_layout,
+            &renderer.pipelines().mesh.material_bind_group_layout,
             renderer.default_texture(),
         );
         // renderer.add_object(cube_id, cube); // 暂时注释，后续需要正确实现
@@ -436,10 +437,31 @@ impl AlanderApp {
 
     /// 更新
     fn update(&mut self, delta_time: f32) {
-        // 同步 ECS 中的 Transform 到渲染器中的模型矩阵，并同步包围盒
+        // 同步 ECS 中的 Transform 到渲染器中的模型矩阵，并同步包围盒与材质
         if let Some(scene) = self.scene_manager.active_scene_mut() {
-            let mut query = scene.world.query::<(&alander_core::scene::Transform, &alander_core::scene::RenderId, Option<&mut alander_core::scene::BoundingBox>)>();
-            for (transform, render_id, mut bbox) in query.iter_mut(&mut scene.world) {
+            // 1. 同步光源
+            let mut light_buffer = alander_render::pipelines::LightBuffer::new();
+            let mut light_query = scene.world.query::<(&Transform, &PointLight)>();
+            for (transform, light) in light_query.iter(&scene.world) {
+                let render_light = alander_render::pipelines::Light::new(
+                    transform.position.into(),
+                    light.color.into(),
+                    light.intensity,
+                    light.range,
+                );
+                light_buffer.add_light(render_light);
+            }
+            self.renderer.update_lights(&light_buffer);
+
+            // 2. 同步渲染对象（模型与材质）
+            let mut query = scene.world.query::<(
+                &alander_core::scene::Transform, 
+                &alander_core::scene::RenderId, 
+                Option<&mut alander_core::scene::BoundingBox>,
+                Option<&alander_core::scene::PBRMaterial>
+            )>();
+            
+            for (transform, render_id, mut bbox, material) in query.iter_mut(&mut scene.world) {
                 let matrix = transform.compute_matrix();
                 
                 // 同步渲染器
@@ -450,7 +472,16 @@ impl AlanderApp {
                     m[2][0], m[2][1], m[2][2], m[2][3],
                     m[3][0], m[3][1], m[3][2], m[3][3],
                 );
-                self.renderer.update_object_model(&render_id.0, cg_matrix);
+
+                let render_mat = material.map(|m| alander_render::pipelines::MaterialBuffer {
+                    base_color: m.base_color.into(),
+                    metallic: m.metallic,
+                    roughness: m.roughness,
+                    _padding: [0.0; 2],
+                    emissive: [m.emissive.x, m.emissive.y, m.emissive.z, 0.0],
+                });
+
+                self.renderer.update_object_model_material(&render_id.0, cg_matrix, render_mat);
 
                 // 更新世界空间包围盒
                 if let Some(ref mut bbox) = bbox {
@@ -666,6 +697,56 @@ impl AlanderApp {
                                 if ui.button("重置变换").clicked() {
                                     *transform = alander_core::scene::Transform::default();
                                 }
+                            });
+                        }
+
+                        // 点光源编辑
+                        let mut light_query = scene.world.query::<&mut alander_core::scene::PointLight>();
+                        if let Ok(mut light) = light_query.get_mut(&mut scene.world, entity) {
+                            ui.collapsing("点光源 (Point Light)", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("颜色");
+                                    let mut color_arr = [light.color.x, light.color.y, light.color.z];
+                                    if ui.color_edit_button_rgb(&mut color_arr).changed() {
+                                        light.color = glam::Vec3::from_slice(&color_arr);
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("强度");
+                                    ui.add(egui::DragValue::new(&mut light.intensity).speed(0.1).clamp_range(0.0..=100.0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("范围");
+                                    ui.add(egui::DragValue::new(&mut light.range).speed(0.5).clamp_range(0.1..=1000.0));
+                                });
+                            });
+                        }
+
+                        // PBR 材质编辑
+                        let mut material_query = scene.world.query::<&mut alander_core::scene::PBRMaterial>();
+                        if let Ok(mut mat) = material_query.get_mut(&mut scene.world, entity) {
+                            ui.collapsing("PBR 材质", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("基色");
+                                    let mut color_arr = [mat.base_color.x, mat.base_color.y, mat.base_color.z, mat.base_color.w];
+                                    if ui.color_edit_button_rgba_unmultiplied(&mut color_arr).changed() {
+                                        mat.base_color = glam::Vec4::from_slice(&color_arr);
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("金属度");
+                                    ui.add(egui::Slider::new(&mut mat.metallic, 0.0..=1.0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("粗糙度");
+                                    ui.add(egui::Slider::new(&mut mat.roughness, 0.0..=1.0));
+                                });
+                                ui.collapsing("自发光 (Emissive)", |ui| {
+                                    let mut color_arr = [mat.emissive.x, mat.emissive.y, mat.emissive.z];
+                                    if ui.color_edit_button_rgb(&mut color_arr).changed() {
+                                        mat.emissive = glam::Vec3::from_slice(&color_arr);
+                                    }
+                                });
                             });
                         }
                     }

@@ -20,8 +20,10 @@ pub struct Renderer {
     depth_view: wgpu::TextureView,
     /// 相机缓冲区
     camera_buffer: wgpu::Buffer,
-    /// 相机绑定组
+    /// 相机与光源绑定组
     camera_bind_group: wgpu::BindGroup,
+    /// 光源缓冲区
+    light_buffer: wgpu::Buffer,
     /// 渲染管线
     pipelines: Pipelines,
     /// 场景对象
@@ -65,17 +67,6 @@ impl Renderer {
                 });
 
         // 创建相机绑定组
-        let camera_bind_group = renderer
-            .device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("相机绑定组"),
-                layout: &renderer.pipelines.mesh.camera_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }],
-            });
-
         // 创建光源缓冲区
         let light_buffer =
             renderer
@@ -85,6 +76,24 @@ impl Renderer {
                     contents: bytemuck::bytes_of(&crate::pipelines::LightBuffer::new()),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
+
+        // 创建相机绑定组
+        let camera_bind_group = renderer
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("相机及光源绑定组"),
+                layout: &renderer.pipelines.mesh.camera_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: camera_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: light_buffer.as_entire_binding(),
+                    },
+                ],
+            });
 
         // 创建渲染管线
         let pipelines = Pipelines::new(renderer.device(), renderer.config());
@@ -96,6 +105,7 @@ impl Renderer {
             camera_bind_group,
             pipelines,
             objects: HashMap::new(),
+            light_buffer,
             default_texture,
             textures: Vec::new(),
         })
@@ -130,6 +140,15 @@ impl Renderer {
     /// 获取渲染管线
     pub fn pipelines(&self) -> &Pipelines {
         &self.pipelines
+    }
+
+    /// 更新光源
+    pub fn update_lights(&mut self, lights: &crate::pipelines::LightBuffer) {
+        self.renderer.queue().write_buffer(
+            &self.light_buffer,
+            0,
+            bytemuck::bytes_of(lights),
+        );
     }
 
     /// 获取 WGPU 设备
@@ -239,8 +258,10 @@ impl Renderer {
                 &gltf_mesh.data.indices,
                 self.pipelines.mesh.model_bind_group_layout(),
                 &self.pipelines.mesh.texture_bind_group_layout,
+                &self.pipelines.mesh.material_bind_group_layout,
                 diffuse_texture,
                 gltf_mesh.transform,
+                crate::pipelines::MaterialBuffer::default(),
             );
 
             let id = uuid::Uuid::new_v4();
@@ -283,10 +304,18 @@ impl Renderer {
         self.renderer.size()
     }
 
-    /// 更新对象模型矩阵
-    pub fn update_object_model(&mut self, object_id: &uuid::Uuid, model: cgmath::Matrix4<f32>) {
+    /// 更新对象模型矩阵与材质
+    pub fn update_object_model_material(
+        &mut self, 
+        object_id: &uuid::Uuid, 
+        model: cgmath::Matrix4<f32>,
+        material: Option<crate::pipelines::MaterialBuffer>,
+    ) {
         if let Some(object) = self.objects.get_mut(object_id) {
             object.update_model(self.renderer.queue(), model);
+            if let Some(mat) = material {
+                self.renderer.queue().write_buffer(&object.material_buffer, 0, bytemuck::bytes_of(&mat));
+            }
         }
     }
 
@@ -356,6 +385,7 @@ pub fn create_cube(
     device: &wgpu::Device,
     model_bind_group_layout: &wgpu::BindGroupLayout,
     texture_bind_group_layout: &wgpu::BindGroupLayout,
+    material_bind_group_layout: &wgpu::BindGroupLayout,
     diffuse_texture: &crate::texture::Texture,
 ) -> SceneObject {
     // 立方体顶点数据
@@ -506,8 +536,10 @@ pub fn create_cube(
         indices,
         model_bind_group_layout,
         texture_bind_group_layout,
+        material_bind_group_layout,
         diffuse_texture,
         glam::Mat4::IDENTITY,
+        crate::pipelines::MaterialBuffer::default(),
     )
 }
 

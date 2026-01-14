@@ -254,6 +254,44 @@ pub mod scene {
         pub world: math::AABB,
     }
 
+    /// PBR 材质组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize)]
+    pub struct PBRMaterial {
+        pub base_color: Vec4,
+        pub metallic: f32,
+        pub roughness: f32,
+        pub emissive: Vec3,
+    }
+
+    impl Default for PBRMaterial {
+        fn default() -> Self {
+            Self {
+                base_color: Vec4::ONE,
+                metallic: 0.0,
+                roughness: 0.5,
+                emissive: Vec3::ZERO,
+            }
+        }
+    }
+
+    /// 点光源组件
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct PointLight {
+        pub color: Vec3,
+        pub intensity: f32,
+        pub range: f32,
+    }
+
+    impl Default for PointLight {
+        fn default() -> Self {
+            Self {
+                color: Vec3::ONE,
+                intensity: 1.0,
+                range: 10.0,
+            }
+        }
+    }
+
     impl Camera {
         /// 创建透视相机
         pub fn perspective(fov_y: f32, aspect_ratio: f32, near: f32, far: f32) -> Self {

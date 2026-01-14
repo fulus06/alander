@@ -2,7 +2,7 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox};
+use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox, PBRMaterial, PointLight};
 use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
 use alander_core::assets::{AssetManager, AssetLoader, SimpleMeshLoader, SimpleMaterialLoader};
@@ -70,6 +70,7 @@ impl Scene {
                     renderer.device(),
                     &renderer.pipelines().mesh.model_bind_group_layout,
                     &renderer.pipelines().mesh.texture_bind_group_layout,
+                    &renderer.pipelines().mesh.material_bind_group_layout,
                     renderer.default_texture(),
                 );
                 let render_uuid = uuid::Uuid::new_v4();
@@ -200,6 +201,7 @@ impl SceneManager {
                 renderer.device(),
                 &renderer.pipelines().mesh.model_bind_group_layout,
                 &renderer.pipelines().mesh.texture_bind_group_layout,
+                &renderer.pipelines().mesh.material_bind_group_layout,
                 renderer.default_texture(),
             );
             let ground_uuid = uuid::Uuid::new_v4();
@@ -216,19 +218,42 @@ impl SceneManager {
                 BoundingBox {
                     local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
                     world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
+                },
+                PBRMaterial {
+                    base_color: glam::Vec4::new(0.5, 0.5, 0.5, 1.0),
+                    metallic: 0.1,
+                    roughness: 0.8,
+                    emissive: glam::Vec3::ZERO,
                 }
             ));
             
-            // 创建立方体实体
+            // 创建主要立方体实体
             if let Ok((mesh_handle, render_id, bbox)) = scene.load_mesh(renderer, "cube") {
                 scene.create_entity((
-                    Name("立方体".to_string()),
+                    Name("主立方体".to_string()),
                     Transform::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
                     Mesh { handle: mesh_handle },
                     render_id,
                     bbox,
+                    PBRMaterial {
+                        base_color: glam::Vec4::new(1.0, 0.3, 0.3, 1.0), // 红色材质
+                        metallic: 0.8,
+                        roughness: 0.2,
+                        emissive: glam::Vec3::ZERO,
+                    }
                 ));
             }
+
+            // 创建光源实体
+            scene.create_entity((
+                Name("主光源".to_string()),
+                Transform::from_translation(glam::Vec3::new(4.0, 5.0, 4.0)),
+                PointLight {
+                    color: glam::Vec3::new(1.0, 1.0, 1.0),
+                    intensity: 50.0,
+                    range: 20.0,
+                },
+            ));
             
             // 创建更多测试实体
             for i in 0..3 {
@@ -236,6 +261,7 @@ impl SceneManager {
                     renderer.device(),
                     &renderer.pipelines().mesh.model_bind_group_layout,
                     &renderer.pipelines().mesh.texture_bind_group_layout,
+                    &renderer.pipelines().mesh.material_bind_group_layout,
                     renderer.default_texture(),
                 );
                 let cube_uuid = uuid::Uuid::new_v4();
@@ -248,7 +274,8 @@ impl SceneManager {
                     BoundingBox {
                         local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
                         world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
-                    }
+                    },
+                    PBRMaterial::default(),
                 ));
             }
         }

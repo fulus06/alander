@@ -35,6 +35,7 @@ pub struct MeshPipeline {
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub model_bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
+    pub material_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl MeshPipeline {
@@ -55,6 +56,17 @@ impl MeshPipeline {
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 光源绑定
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -107,6 +119,24 @@ impl MeshPipeline {
                 ],
             });
 
+        // 材质绑定组布局
+        let material_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("材质绑定组布局"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         // 管线布局
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("网格管线布局"),
@@ -114,6 +144,7 @@ impl MeshPipeline {
                 &camera_bind_group_layout,
                 &model_bind_group_layout,
                 &texture_bind_group_layout,
+                &material_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -168,6 +199,7 @@ impl MeshPipeline {
             camera_bind_group_layout,
             model_bind_group_layout,
             texture_bind_group_layout,
+            material_bind_group_layout,
         }
     }
 }
@@ -243,19 +275,23 @@ impl MeshPipeline {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Light {
     pub position: [f32; 3],
+    pub _padding1: f32,
     pub color: [f32; 3],
     pub intensity: f32,
-    pub _padding: f32,
+    pub range: f32,
+    pub _padding2: [f32; 3],
 }
 
 impl Light {
     /// 创建新的光源
-    pub fn new(position: [f32; 3], color: [f32; 3], intensity: f32) -> Self {
+    pub fn new(position: [f32; 3], color: [f32; 3], intensity: f32, range: f32) -> Self {
         Self {
             position,
+            _padding1: 0.0,
             color,
             intensity,
-            _padding: 0.0,
+            range,
+            _padding2: [0.0; 3],
         }
     }
 }
@@ -274,10 +310,10 @@ impl LightBuffer {
     pub fn new() -> Self {
         Self {
             lights: [
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0),
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0),
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0),
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0),
+                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
+                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
+                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
+                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
             ],
             light_count: 0,
             _padding: [0, 0, 0],
@@ -311,6 +347,29 @@ impl LightBuffer {
     }
 }
 
+/// 材质参数缓冲区
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MaterialBuffer {
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub _padding: [f32; 2],
+    pub emissive: [f32; 4],
+}
+
+impl Default for MaterialBuffer {
+    fn default() -> Self {
+        Self {
+            base_color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            _padding: [0.0; 2],
+            emissive: [0.0, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
 /// 模型缓冲区
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -333,8 +392,10 @@ pub struct SceneObject {
     pub index_buffer: wgpu::Buffer,
     pub num_elements: u32,
     pub model_buffer: wgpu::Buffer,
+    pub material_buffer: wgpu::Buffer,
     pub model_bind_group: wgpu::BindGroup,
     pub texture_bind_group: wgpu::BindGroup,
+    pub material_bind_group: wgpu::BindGroup,
 }
 
 impl SceneObject {
@@ -345,8 +406,10 @@ impl SceneObject {
         indices: &[u32],
         model_bind_group_layout: &wgpu::BindGroupLayout,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
+        material_bind_group_layout: &wgpu::BindGroupLayout,
         diffuse_texture: &crate::texture::Texture,
         transform: glam::Mat4,
+        material: MaterialBuffer,
     ) -> Self {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("顶点缓冲区"),
@@ -397,13 +460,32 @@ impl SceneObject {
             ],
         });
 
+        // 创建材质参数缓冲区
+        let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("材质缓冲区"),
+            contents: bytemuck::bytes_of(&material),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 创建材质绑定组
+        let material_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("材质绑定组"),
+            layout: material_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: material_buffer.as_entire_binding(),
+            }],
+        });
+
         Self {
             vertex_buffer,
             index_buffer,
             num_elements,
             model_buffer,
+            material_buffer,
             model_bind_group,
             texture_bind_group,
+            material_bind_group,
         }
     }
 
@@ -419,6 +501,7 @@ impl SceneObject {
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.set_bind_group(1, &self.model_bind_group, &[]);
         render_pass.set_bind_group(2, &self.texture_bind_group, &[]);
+        render_pass.set_bind_group(3, &self.material_bind_group, &[]);
         render_pass.draw_indexed(0..self.num_elements, 0, 0..1);
     }
 }
