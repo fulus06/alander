@@ -1,4 +1,4 @@
-use glam::{Vec3, Mat4, Quat, Vec2};
+use glam::{Vec3, Quat};
 use alander_core::math::Ray;
 use alander_core::scene::Transform;
 use alander_render::pipelines::DebugVertex;
@@ -182,7 +182,7 @@ impl GizmoManager {
                 // 记录初始点击位置在旋转平面的投影
                 if let Some(hit_point) = ray_plane_intersection(ray.origin, ray.direction, transform.position, dir) {
                     self.drag_start_point = hit_point;
-                    let to_point = (hit_point - transform.position).normalize();
+                    let _to_point = (hit_point - transform.position).normalize();
                     // 记录初始角度（通过反正切）
                     // 我们需要一个局部的 2D 坐标系在平面上
                     // 这里简化处理：直接记录初始方向向量即可
