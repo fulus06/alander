@@ -12,6 +12,10 @@ Alander is not merely a 3D software, but rather a "future-oriented procedural 3D
 - **Non-destructive Workflow**: Fully adopts node-based and stack-based logic, and all operations can be adjusted at any time
 - **ECS Architecture**: High-performance parallel computing, capable of easily handling millions of objects
 
+## Supporting Platform
+* macos
+
+
 ## Example
 
 ```bash
