@@ -113,7 +113,7 @@ python -m http.server
 
 ## 许可证
 
-本项目采用MIT许可证（见LICENSE文件）。
+本项目采用Apache 2.0许可证（见LICENSE文件）。
 
 ## 致谢
 
