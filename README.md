@@ -10,6 +10,14 @@ Alander 不仅仅是一个 3D 软件，而是**"面向未来的程序化 3D 引�
 - **非破坏性工作流**：全面采用节点式和堆栈式逻辑，所有操作均可随时调整
 - **ECS 架构**：高性能并行计算，可轻松处理百万级物体
 
+## 示例
+
+```bash
+cargo run --bin alander
+```
+
+# 下面的内容暂时仅供参考：
+
 ## 架构概述
 
 Alander 采用模块化架构，主要包含以下核心模块：
@@ -78,13 +86,7 @@ python -m http.server
 - `alander_editor` - 提供编辑器界面、工具栏和交互逻辑
 - `alander_wasm` - 提供WebAssembly绑定和浏览器集成
 
-## 示例
 
-基础窗口示例展示了一个简单的旋转立方体：
-
-```bash
-cargo run --example basic_window
-```
 
 这将创建一个800x600的窗口，显示一个旋转的立方体。按ESC键退出。
 
