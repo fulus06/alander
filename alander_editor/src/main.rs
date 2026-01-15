@@ -15,8 +15,10 @@ use winit::{
 
 mod scene_manager;
 mod physics_manager;
-use scene_manager::SceneManager;
+mod gizmo_manager;
+use scene_manager::{SceneManager, SceneHandle};
 use physics_manager::PhysicsManager;
+use gizmo_manager::GizmoManager;
 
 /// 应用程序状态
 struct AlanderApp {
@@ -58,6 +60,8 @@ struct AlanderApp {
 
     /// 物理管理器
     physics_manager: PhysicsManager,
+    /// Gizmo 管理器
+    gizmo_manager: GizmoManager,
 
     /// EGUI 状态
     egui_state: egui_winit::State,
@@ -191,6 +195,7 @@ impl AlanderApp {
             dock_state,
             egui_renderer,
             physics_manager: PhysicsManager::new(),
+            gizmo_manager: GizmoManager::new(),
             fps_update_timer: 0.0,
             displayed_delta_time: 0.0,
         };
@@ -274,6 +279,16 @@ impl AlanderApp {
                         && input.state == winit::event::ElementState::Pressed
                     {
                         self.running = false;
+                    }
+
+                    // Gizmo 快捷键
+                    if input.state == winit::event::ElementState::Pressed {
+                        match key {
+                            winit::event::VirtualKeyCode::W => self.gizmo_manager.mode = gizmo_manager::GizmoMode::Translate,
+                            winit::event::VirtualKeyCode::E => self.gizmo_manager.mode = gizmo_manager::GizmoMode::Rotate,
+                            winit::event::VirtualKeyCode::R => self.gizmo_manager.mode = gizmo_manager::GizmoMode::Scale,
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -425,6 +440,42 @@ impl AlanderApp {
                 self.renderer.update_debug_lines(&debug_lines);
             } else {
                 self.renderer.update_debug_lines(&[]);
+            }
+
+            // 3. Gizmo 更新
+            // 获取当前鼠标射线
+            let mouse_pos = self.input.mouse_position;
+            let window_size = self.window.inner_size();
+            let x = mouse_pos.x / window_size.width as f32;
+            let y = mouse_pos.y / window_size.height as f32;
+            let ray = self.renderer.screen_to_world_ray(glam::Vec2::new(x, y));
+            
+            let is_left_pressed = self.input.mouse_button_pressed(winit::event::MouseButton::Left);
+            
+            self.gizmo_manager.update(
+                &ray, 
+                is_left_pressed, 
+                self.editor_state.selected_entity, 
+                &mut scene.world, 
+                self.camera_transform.position
+            );
+
+            // 如果有选中的实体，显示 Gizmo
+            if let Some(entity) = self.editor_state.selected_entity {
+                if let Some(transform) = scene.world.get::<alander_core::scene::Transform>(entity) {
+                    let gizmo_lines = self.gizmo_manager.render(transform, self.camera_transform.position);
+                    
+                    // 将 Gizmo 线条合并到调试线条中（或独立更新）
+                    // 为了简单，我们先在开启了显示碰撞体时追加，或者独立一套逻辑
+                    // 暂时：Gizmo 始终显示
+                    if self.editor_state.show_colliders {
+                        let mut all_lines = self.physics_manager.render_debug_lines();
+                        all_lines.extend(gizmo_lines);
+                        self.renderer.update_debug_lines(&all_lines);
+                    } else {
+                        self.renderer.update_debug_lines(&gizmo_lines);
+                    }
+                }
             }
         }
 
@@ -631,6 +682,12 @@ impl AlanderApp {
                 
                 ui.separator();
                 ui.checkbox(&mut self.editor_state.show_colliders, "显示碰撞体");
+                
+                ui.separator();
+                ui.label("变换工具:");
+                ui.selectable_value(&mut self.gizmo_manager.mode, gizmo_manager::GizmoMode::Translate, "位移");
+                ui.selectable_value(&mut self.gizmo_manager.mode, gizmo_manager::GizmoMode::Rotate, "旋转");
+                ui.selectable_value(&mut self.gizmo_manager.mode, gizmo_manager::GizmoMode::Scale, "缩放");
             });
         });
 

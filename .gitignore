@@ -158,3 +158,5 @@ venv/
 *.mtl
 *.gltf
 *.glb
+
+temp.txt
