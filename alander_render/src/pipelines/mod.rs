@@ -2,8 +2,6 @@
 //!
 //! 此模块包含所有渲染管线的定义和管理。
 
-use crate::utils;
-use cgmath::SquareMatrix;
 use wgpu::util::DeviceExt;
 
 #[rustfmt::skip]
@@ -24,9 +22,9 @@ pub struct Pipelines {
 
 impl Pipelines {
     /// 创建所有渲染管线
-    pub fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> Self {
-        let mesh = MeshPipeline::new(device, config.format);
-        let skybox = SkyboxPipeline::new(device, config.format);
+    pub fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, hdr_filterable: bool) -> Self {
+        let mesh = MeshPipeline::new(device, config.format, hdr_filterable);
+        let skybox = SkyboxPipeline::new(device, config.format, hdr_filterable);
 
         Self { mesh, skybox }
     }
@@ -43,7 +41,7 @@ pub struct MeshPipeline {
 
 impl MeshPipeline {
     /// 创建新的网格管线
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, hdr_filterable: bool) -> Self {
         // 着色器
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("网格着色器"),
@@ -84,7 +82,7 @@ impl MeshPipeline {
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
                             view_dimension: wgpu::TextureViewDimension::Cube,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: hdr_filterable },
                         },
                         count: None,
                     },
@@ -95,7 +93,7 @@ impl MeshPipeline {
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
                             view_dimension: wgpu::TextureViewDimension::Cube,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: hdr_filterable },
                         },
                         count: None,
                     },
@@ -103,7 +101,11 @@ impl MeshPipeline {
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        ty: wgpu::BindingType::Sampler(if hdr_filterable { 
+                            wgpu::SamplerBindingType::Filtering 
+                        } else { 
+                            wgpu::SamplerBindingType::NonFiltering 
+                        }),
                         count: None,
                     },
                 ],
@@ -475,8 +477,9 @@ impl SceneObject {
         diffuse_texture: &crate::texture::Texture,
         normal_texture: &crate::texture::Texture,
         mr_texture: &crate::texture::Texture,
-        transform: glam::Mat4,
+        matrix: glam::Mat4,
         material: MaterialBuffer,
+        sampler: &wgpu::Sampler,
     ) -> Self {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("顶点缓冲区"),
@@ -490,14 +493,13 @@ impl SceneObject {
         });
         let num_elements = indices.len() as u32;
 
-        // 转换 glam::Mat4 到 [f32; 16] 供 bytemuck 使用
-        let transform_array: [[f32; 4]; 4] = transform.to_cols_array_2d();
-        let matrix = cgmath::Matrix4::from(transform_array);
+        // 转换 glam::Mat4 到 cgmath::Matrix4<f32>
+        let cgmath_matrix = cgmath::Matrix4::from(matrix.to_cols_array_2d());
 
         // 创建模型缓冲区
         let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("模型缓冲区"),
-            contents: bytemuck::bytes_of(&ModelBuffer::new(matrix)),
+            contents: bytemuck::bytes_of(&ModelBuffer::new(cgmath_matrix)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -530,7 +532,7 @@ impl SceneObject {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -589,7 +591,7 @@ pub struct SkyboxPipeline {
 }
 
 impl SkyboxPipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, hdr_filterable: bool) -> Self {
         // 着色器
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("天空盒着色器"),
@@ -625,14 +627,18 @@ impl SkyboxPipeline {
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
                             view_dimension: wgpu::TextureViewDimension::Cube,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: hdr_filterable },
                         },
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        ty: wgpu::BindingType::Sampler(if hdr_filterable { 
+                            wgpu::SamplerBindingType::Filtering 
+                        } else { 
+                            wgpu::SamplerBindingType::NonFiltering 
+                        }),
                         count: None,
                     },
                 ],

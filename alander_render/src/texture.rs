@@ -1,12 +1,10 @@
-//! 纹理处理工具
-
 use anyhow::Result;
 use image::GenericImageView;
+use half::f16;
 
 pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
-    pub sampler: wgpu::Sampler,
 }
 
 impl Texture {
@@ -64,20 +62,10 @@ impl Texture {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
 
         Ok(Self {
             texture,
             view,
-            sampler,
         })
     }
 
@@ -143,20 +131,9 @@ impl Texture {
             array_layer_count: Some(6),
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
         Ok(Self {
             texture,
             view,
-            sampler,
         })
     }
 
@@ -205,9 +182,7 @@ impl Texture {
             dimension: Some(wgpu::TextureViewDimension::Cube),
             ..Default::default()
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
-
-        Ok(Self { texture, view, sampler })
+        Ok(Self { texture, view })
     }
 
     /// 从 HDR 文件创建纹理 (.hdr)
@@ -215,6 +190,8 @@ impl Texture {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         path: &std::path::Path,
+        format: wgpu::TextureFormat,
+        _sampler: &wgpu::Sampler,
     ) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         let decoder = image::codecs::hdr::HdrDecoder::new(std::io::BufReader::new(file))?;
@@ -241,32 +218,32 @@ impl Texture {
         let image_data = decoder.read_image_native()?;
         
         // 将 RGBE 转换为 [f32; 4]
-        let mut pixels = Vec::with_capacity((metadata.width * metadata.height * 4) as usize);
+        let mut pixels_f32 = Vec::with_capacity((metadata.width * metadata.height * 4) as usize);
         for pixel in image_data {
             let rgbe = [pixel.c[0], pixel.c[1], pixel.c[2], pixel.e];
             if rgbe[3] == 0 {
-                pixels.extend_from_slice(&[0.0, 0.0, 0.0, 1.0]);
+                pixels_f32.extend_from_slice(&[0.0, 0.0, 0.0, 1.0]);
             } else {
                 let exponent = f32::from(rgbe[3]) - 128.0;
                 let factor = exponent.exp2() / 256.0;
-                pixels.push(f32::from(rgbe[0]) * factor);
-                pixels.push(f32::from(rgbe[1]) * factor);
-                pixels.push(f32::from(rgbe[2]) * factor);
-                pixels.push(1.0);
+                pixels_f32.push(f32::from(rgbe[0]) * factor);
+                pixels_f32.push(f32::from(rgbe[1]) * factor);
+                pixels_f32.push(f32::from(rgbe[2]) * factor);
+                pixels_f32.push(1.0);
             }
         }
 
         // 如果需要缩放
-        let final_pixels = if width != metadata.width || height != metadata.height {
+        let final_pixels_f32 = if width != metadata.width || height != metadata.height {
             let img_buffer = image::ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_raw(
-                metadata.width, metadata.height, pixels
+                metadata.width, metadata.height, pixels_f32
             ).ok_or_else(|| anyhow::anyhow!("创建缩放缓冲区失败"))?;
             
             let dynamic_img = image::DynamicImage::ImageRgba32F(img_buffer);
             let resized_img = dynamic_img.resize(width, height, image::imageops::FilterType::Lanczos3);
             resized_img.to_rgba32f().into_raw()
         } else {
-            pixels
+            pixels_f32
         };
 
         let size = wgpu::Extent3d {
@@ -281,10 +258,18 @@ impl Texture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+
+        // 根据目标格式准备字节数据
+        let bytes = if format == wgpu::TextureFormat::Rgba16Float {
+            let pixels_f16: Vec<f16> = final_pixels_f32.iter().map(|&f| f16::from_f32(f)).collect();
+            bytemuck::cast_slice(&pixels_f16).to_vec()
+        } else {
+            bytemuck::cast_slice(&final_pixels_f32).to_vec()
+        };
 
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -293,27 +278,18 @@ impl Texture {
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
             },
-            bytemuck::cast_slice(&final_pixels),
+            &bytes,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(16 * width),
+                bytes_per_row: Some((if format == wgpu::TextureFormat::Rgba16Float { 8 } else { 16 }) * width),
                 rows_per_image: Some(height),
             },
             size,
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
 
-        Ok(Self { texture, view, sampler })
+        Ok(Self { texture, view })
     }
 
     /// 将全景图转换为立方体贴图
@@ -322,6 +298,9 @@ impl Texture {
         queue: &wgpu::Queue,
         equirect_texture: &Texture,
         cube_size: u32,
+        format: wgpu::TextureFormat,
+        sampler: &wgpu::Sampler,
+        filterable: bool,
     ) -> Result<Self> {
         // 创建立方体贴图纹理
         let size = wgpu::Extent3d {
@@ -335,7 +314,7 @@ impl Texture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -352,9 +331,16 @@ impl Texture {
         });
 
         // 创建计算管线
+        let shader_src = include_str!("shaders/equirect_to_cube.wgsl");
+        let processed_src = if format == wgpu::TextureFormat::Rgba16Float {
+            shader_src.replace("rgba32float", "rgba16float")
+        } else {
+            shader_src.to_string()
+        };
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("HDR 转换着色器"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/equirect_to_cube.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(processed_src.into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -364,7 +350,7 @@ impl Texture {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -373,7 +359,11 @@ impl Texture {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    ty: wgpu::BindingType::Sampler(if filterable { 
+                        wgpu::SamplerBindingType::Filtering 
+                    } else { 
+                        wgpu::SamplerBindingType::NonFiltering 
+                    }),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -381,7 +371,7 @@ impl Texture {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba32Float,
+                        format: format,
                         view_dimension: wgpu::TextureViewDimension::D2Array,
                     },
                     count: None,
@@ -412,7 +402,7 @@ impl Texture {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&equirect_texture.sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -431,13 +421,6 @@ impl Texture {
         }
         queue.submit(Some(encoder.finish()));
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        Ok(Self { texture, view, sampler })
+        Ok(Self { texture, view })
     }
 }

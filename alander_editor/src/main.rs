@@ -1,25 +1,23 @@
 use alander_core::{
-    scene::{Camera, Transform, BoundingBox, PointLight, RigidBodyType, ColliderShape},
+    scene::{Camera, Transform, BoundingBox, PointLight, RigidBodyType},
     InputState, RenderState, Time,
 };
-use alander_core::math::{Ray, AABB};
+use alander_core::math::Ray;
 use alander_render::renderer::{Renderer, create_cube};
-use egui::{self, Color32, Context, FontId, RichText, Ui};
-use egui_dock::{DockArea, NodeIndex, Style};
-use glam::{Mat4, Quat, Vec2, Vec3, Vec4Swizzles};
-use std::collections::HashMap;
+use egui;
+use egui_dock;
+use glam::{Mat4, Vec3, Vec4Swizzles};
+use uuid;
 use tracing::{info, Level};
-use uuid::Uuid;
 use winit::{
-    event::{ElementState, Event, KeyboardInput, MouseButton, VirtualKeyCode, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
+    event::{Event, WindowEvent, ElementState, MouseButton},
+    event_loop::ControlFlow,
 };
 use bevy_ecs::entity::Entity; // Added for Entity type
 
 mod scene_manager;
 mod physics_manager;
-use scene_manager::{SceneManager, SceneHandle};
+use scene_manager::SceneManager;
 use physics_manager::PhysicsManager;
 
 /// 应用程序状态
@@ -142,6 +140,7 @@ impl AlanderApp {
             &renderer.pipelines().mesh.texture_bind_group_layout,
             &renderer.pipelines().mesh.material_bind_group_layout,
             renderer.default_texture(),
+            &renderer.samplers.linear_clamp,
         );
         // renderer.add_object(cube_id, cube); // 暂时注释，后续需要正确实现
 
@@ -704,7 +703,7 @@ impl AlanderApp {
                 ui.separator();
                 
                 if let Some(entity) = self.editor_state.selected_entity {
-                    if let Some(mut scene) = self.scene_manager.active_scene_mut() {
+                    if let Some(scene) = self.scene_manager.active_scene_mut() {
                         let mut name_query = scene.world.query::<&alander_core::scene::Name>();
                         if let Ok(name) = name_query.get(&scene.world, entity) {
                             ui.horizontal(|ui| {

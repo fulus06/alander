@@ -10,12 +10,36 @@ use cgmath::{Matrix4, Point3, Vector3};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
-use image;
+
+/// 硬件功能支持情况
+#[derive(Debug, Clone, Copy)]
+pub struct HardwareCaps {
+    /// Rgba16Float 是否支持卷积/过滤
+    pub hdr_16_filterable: bool,
+    /// Rgba32Float 是否支持卷积/过滤
+    pub hdr_32_filterable: bool,
+    /// 建议的 HDR 格式
+    pub preferred_hdr_format: wgpu::TextureFormat,
+}
+
+/// 采样器缓存，解耦纹理与采样器
+pub struct SamplerCache {
+    /// 线性过滤 + 边缘拉伸 (适用于 IBL/天空盒)
+    pub linear_clamp: wgpu::Sampler,
+    /// 线性过滤 + 重复 (适用于普通材质)
+    pub linear_repeat: wgpu::Sampler,
+    /// 最近邻过滤 + 边缘拉伸 (兼容性回退)
+    pub nearest_clamp: wgpu::Sampler,
+}
 
 /// 渲染器
 pub struct Renderer {
     /// WGPU 渲染器实例
     renderer: super::Renderer,
+    /// 硬件信息
+    pub caps: HardwareCaps,
+    /// 全局采样器
+    pub samplers: SamplerCache,
     /// 深度纹理视图
     depth_view: wgpu::TextureView,
     /// 相机缓冲区
@@ -30,8 +54,6 @@ pub struct Renderer {
     objects: HashMap<uuid::Uuid, SceneObject>,
     // 默认纹理
     default_texture: crate::texture::Texture,
-    // 默认立方体贴图 (IBL)
-    dummy_cubemap: crate::texture::Texture,
     // 纹理集
     textures: Vec<crate::texture::Texture>,
     // 天空盒
@@ -45,7 +67,68 @@ impl Renderer {
     pub async fn new(window: &Window) -> Result<Self, RenderError> {
         let renderer = super::Renderer::new(window, super::RendererConfig::default()).await?;
 
-        // 创建白色的 1x1 默认纹理
+        // 1. 检测硬件能力
+        let device = renderer.device();
+        let adapter = renderer.adapter();
+        
+        // 检查 16位浮点过滤支持 (大多数硬件支持)
+        let hdr_16_features = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+        let hdr_16_filterable = hdr_16_features.allowed_usages.contains(wgpu::TextureUsages::TEXTURE_BINDING) 
+            && hdr_16_features.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+
+        // 检查 32位浮点过滤支持 (某些旧硬件或移动端不支持)
+        let hdr_32_features = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba32Float);
+        let hdr_32_filterable = hdr_32_features.allowed_usages.contains(wgpu::TextureUsages::TEXTURE_BINDING) 
+            && hdr_32_features.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+
+        let preferred_hdr_format = if hdr_16_filterable {
+            wgpu::TextureFormat::Rgba16Float
+        } else {
+            wgpu::TextureFormat::Rgba32Float
+        };
+
+        let caps = HardwareCaps {
+            hdr_16_filterable,
+            hdr_32_filterable,
+            preferred_hdr_format,
+        };
+
+        tracing::info!("检测到硬件能力: {:?}", caps);
+        tracing::info!("选择 HDR 格式: {:?}, 线性过滤支持: {}", 
+            preferred_hdr_format, 
+            if preferred_hdr_format == wgpu::TextureFormat::Rgba16Float { hdr_16_filterable } else { hdr_32_filterable }
+        );
+
+        // 2. 创建全局采样器
+        let samplers = SamplerCache {
+            linear_clamp: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("线性采样器 (Clamp)"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                ..Default::default()
+            }),
+            linear_repeat: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("线性采样器 (Repeat)"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                ..Default::default()
+            }),
+            nearest_clamp: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("最近邻采样器 (Clamp)"),
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                ..Default::default()
+            }),
+        };
+
+
+        // 3. 继续初始化
         let default_img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255])));
         let default_texture = crate::texture::Texture::from_image(
             renderer.device(),
@@ -83,11 +166,18 @@ impl Renderer {
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
 
+        // 计算 HDR 过滤支持情况
+        let hdr_filterable = if caps.preferred_hdr_format == wgpu::TextureFormat::Rgba16Float {
+            caps.hdr_16_filterable
+        } else {
+            caps.hdr_32_filterable
+        };
+
         // 创建渲染管线
-        let pipelines = Pipelines::new(renderer.device(), renderer.config());
+        let pipelines = Pipelines::new(renderer.device(), renderer.config(), hdr_filterable);
 
         // 创建默认立方体贴图
-        let dummy_cubemap = crate::texture::Texture::create_dummy_cubemap(renderer.device(), renderer.queue())
+        let skybox_texture = crate::texture::Texture::create_dummy_cubemap(renderer.device(), renderer.queue())
             .map_err(|_| RenderError::RequestDevice)?;
 
         // 创建相机绑定组 (包含 IBL)
@@ -107,15 +197,15 @@ impl Renderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&dummy_cubemap.view),
+                        resource: wgpu::BindingResource::TextureView(&skybox_texture.view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&dummy_cubemap.view),
+                        resource: wgpu::BindingResource::TextureView(&skybox_texture.view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&dummy_cubemap.sampler),
+                        resource: wgpu::BindingResource::Sampler(&samplers.linear_clamp),
                     },
                 ],
             });
@@ -139,11 +229,11 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&dummy_cubemap.view),
+                    resource: wgpu::BindingResource::TextureView(&skybox_texture.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&dummy_cubemap.sampler),
+                    resource: wgpu::BindingResource::Sampler(&samplers.linear_clamp),
                 },
             ],
         });
@@ -153,6 +243,8 @@ impl Renderer {
 
         Ok(Self {
             renderer,
+            caps,
+            samplers,
             depth_view,
             camera_buffer,
             camera_bind_group,
@@ -160,7 +252,6 @@ impl Renderer {
             objects: HashMap::new(),
             light_buffer,
             default_texture,
-            dummy_cubemap,
             textures: Vec::new(),
             skybox_texture,
             skybox_bind_group,
@@ -213,11 +304,41 @@ impl Renderer {
         let device = self.renderer.device();
         let queue = self.renderer.queue();
 
-        // 1. 加载 HDR 2D 纹理
-        let equirect = crate::texture::Texture::from_hdr(device, queue, path)?;
+        let hdr_format = self.caps.preferred_hdr_format;
+        // 是否能使用线性过滤取决于硬件能力
+        let sampler = if hdr_format == wgpu::TextureFormat::Rgba16Float {
+            if self.caps.hdr_16_filterable { &self.samplers.linear_clamp } else { &self.samplers.nearest_clamp }
+        } else {
+            if self.caps.hdr_32_filterable { &self.samplers.linear_clamp } else { &self.samplers.nearest_clamp }
+        };
+
+        tracing::info!("正在加载 HDR，目标格式: {:?}", hdr_format);
+
+        // 1. 加载 HDR 2D 纹理 (作为转换源，通常不需要过滤，或用 nearest 即可)
+        let equirect = crate::texture::Texture::from_hdr(
+            device, 
+            queue, 
+            path, 
+            hdr_format, 
+            &self.samplers.nearest_clamp
+        )?;
         
         // 2. 转换为立方体贴图 (1024x1024)
-        let skybox_texture = crate::texture::Texture::equirectangular_to_cubemap(device, queue, &equirect, 1024)?;
+        let filterable = if hdr_format == wgpu::TextureFormat::Rgba16Float {
+            self.caps.hdr_16_filterable
+        } else {
+            self.caps.hdr_32_filterable
+        };
+
+        let skybox_texture = crate::texture::Texture::equirectangular_to_cubemap(
+            device, 
+            queue, 
+            &equirect, 
+            1024,
+            hdr_format,
+            sampler,
+            filterable
+        )?;
         
         // 3. 更新渲染器状态
         self.skybox_texture = skybox_texture;
@@ -233,7 +354,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.skybox_texture.sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -261,7 +382,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.skybox_texture.sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -388,6 +509,7 @@ impl Renderer {
                 mr_texture,
                 gltf_mesh.transform,
                 material_buffer,
+                &self.samplers.linear_clamp,
             );
 
             let id = uuid::Uuid::new_v4();
@@ -560,6 +682,7 @@ pub fn create_cube(
     texture_bind_group_layout: &wgpu::BindGroupLayout,
     material_bind_group_layout: &wgpu::BindGroupLayout,
     diffuse_texture: &crate::texture::Texture,
+    sampler: &wgpu::Sampler,
 ) -> SceneObject {
     // 立方体顶点数据
     let vertices = &[
@@ -739,6 +862,7 @@ pub fn create_cube(
         diffuse_texture, // MR dummy
         glam::Mat4::IDENTITY,
         crate::pipelines::MaterialBuffer::default(),
+        sampler,
     )
 }
 

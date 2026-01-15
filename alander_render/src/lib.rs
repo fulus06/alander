@@ -60,6 +60,7 @@ impl Default for RendererConfig {
 
 /// 渲染器资源
 pub struct Renderer {
+    adapter: wgpu::Adapter,
     surface: wgpu::Surface,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -130,10 +131,19 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        // 检测 HDR 过滤支持情况以配置管线布局
+        let hdr_16_filterable = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float)
+            .flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+        let hdr_32_filterable = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba32Float)
+            .flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+        // 如果 16 位支持过滤，或者 16 位不支持但 32 位支持，管线将支持过滤
+        let hdr_filterable = hdr_16_filterable || hdr_32_filterable;
+
         // 创建渲染管线
-        let pipelines = pipelines::Pipelines::new(&device, &config);
+        let pipelines = pipelines::Pipelines::new(&device, &config, hdr_filterable);
 
         Ok(Self {
+            adapter,
             surface,
             device,
             queue,
@@ -163,11 +173,16 @@ impl Renderer {
         &self.queue
     }
 
+    /// 获取适配器
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
+    }
+
     /// 更新相机
     pub fn update_camera(
         &self,
-        camera: &alander_core::scene::Camera,
-        transform: &alander_core::scene::Transform,
+        _camera: &alander_core::scene::Camera,
+        _transform: &alander_core::scene::Transform,
     ) {
         // 这里需要实现相机更新逻辑
         // 暂时留空，后续实现

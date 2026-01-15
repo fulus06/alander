@@ -2,14 +2,13 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Material, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath};
+use alander_core::scene::{Transform, Mesh, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath};
 use serde::{Serialize, Deserialize};
 use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
 use alander_render::pipelines::{SceneObject, Vertex, MaterialBuffer};
 use alander_core::assets::{AssetManager, AssetLoader, SimpleMeshLoader, SimpleMaterialLoader};
 use bevy_ecs::prelude::*;
-use glam::Vec3;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -89,6 +88,7 @@ impl Scene {
                     renderer.default_texture(),
                     glam::Mat4::IDENTITY,
                     MaterialBuffer::default(),
+                    &renderer.samplers.linear_clamp,
                 );
                 
                 let render_uuid = uuid::Uuid::new_v4();
@@ -252,6 +252,7 @@ impl Scene {
                                 mr_texture,
                                 glam::Mat4::IDENTITY,
                                 material_buffer,
+                                &renderer.samplers.linear_clamp,
                             );
                             let render_uuid = uuid::Uuid::new_v4();
                             renderer.add_object(render_uuid, scene_object);
@@ -397,6 +398,7 @@ impl SceneManager {
                 &renderer.pipelines().mesh.texture_bind_group_layout,
                 &renderer.pipelines().mesh.material_bind_group_layout,
                 renderer.default_texture(),
+                &renderer.samplers.linear_clamp,
             );
             let ground_uuid = uuid::Uuid::new_v4();
             renderer.add_object(ground_uuid, ground_object);
