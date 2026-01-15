@@ -60,6 +60,10 @@ pub struct Renderer {
     skybox_texture: crate::texture::Texture,
     skybox_bind_group: wgpu::BindGroup,
     skybox_camera_bind_group: wgpu::BindGroup,
+    /// 调试顶点缓冲区
+    debug_vertex_buffer: Option<wgpu::Buffer>,
+    /// 调试顶点数量
+    debug_vertex_count: u32,
 }
 
 impl Renderer {
@@ -256,6 +260,8 @@ impl Renderer {
             skybox_texture,
             skybox_bind_group,
             skybox_camera_bind_group,
+            debug_vertex_buffer: None,
+            debug_vertex_count: 0,
         })
     }
 
@@ -469,6 +475,36 @@ impl Renderer {
                 object.render(&mut render_pass);
             }
         }
+
+        // 3. 调试线条渲染过程
+        if let Some(ref buffer) = self.debug_vertex_buffer {
+            if self.debug_vertex_count > 0 {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("调试线条渲染通道"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: true,
+                        }),
+                        stencil_ops: None,
+                    }),
+                });
+
+                render_pass.set_pipeline(&self.pipelines.debug.pipeline);
+                render_pass.set_bind_group(0, &self.skybox_camera_bind_group, &[]); // 复用相机绑定组
+                render_pass.set_vertex_buffer(0, buffer.slice(..));
+                render_pass.draw(0..self.debug_vertex_count, 0..1);
+            }
+        }
     }
 
     /// 添加 glTF 模型
@@ -611,6 +647,37 @@ impl Renderer {
             if let Some(mat) = material {
                 self.renderer.queue().write_buffer(&object.material_buffer, 0, bytemuck::bytes_of(&mat));
             }
+        }
+    }
+
+    /// 更新调试线条
+    pub fn update_debug_lines(&mut self, vertices: &[crate::pipelines::DebugVertex]) {
+        if vertices.is_empty() {
+            self.debug_vertex_count = 0;
+            return;
+        }
+
+        let device = self.renderer.device();
+        let size = (vertices.len() * std::mem::size_of::<crate::pipelines::DebugVertex>()) as u64;
+
+        // 如果缓冲区不存在或太小，重新创建
+        let needs_recreate = match &self.debug_vertex_buffer {
+            Some(buffer) => buffer.size() < size,
+            None => true,
+        };
+
+        if needs_recreate {
+            self.debug_vertex_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("调试顶点缓冲区"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+
+        if let Some(ref buffer) = self.debug_vertex_buffer {
+            self.renderer.queue().write_buffer(buffer, 0, bytemuck::cast_slice(vertices));
+            self.debug_vertex_count = vertices.len() as u32;
         }
     }
 

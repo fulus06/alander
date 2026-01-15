@@ -27,7 +27,7 @@ gltf = "1.4" # glTF加载
 image = "0.24"
 
 # 物理引擎
-rapier3d = "0.17"
+rapier3d = { version = "0.17", features = ["debug-render"] }
 
 # 序列化
 serde = { version = "1.0", features = ["derive"] }

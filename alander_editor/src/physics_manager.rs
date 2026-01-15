@@ -3,6 +3,7 @@ use rapier3d::na::{Vector3, UnitQuaternion, Isometry3, Quaternion};
 use alander_core::scene::{Transform, RigidBody, Collider, RigidBodyType, ColliderShape};
 use glam::{Vec3, Quat};
 use bevy_ecs::prelude::*;
+use rapier3d::pipeline::{DebugRenderPipeline, DebugRenderMode, DebugRenderStyle, DebugRenderBackend, DebugRenderObject};
 
 /// 物理管理器，封装了 Rapier3D 的世界和模拟逻辑
 pub struct PhysicsManager {
@@ -28,6 +29,8 @@ pub struct PhysicsManager {
     pub multibody_joint_set: MultibodyJointSet,
     /// 连续碰撞检测 (CCD) 解析器
     pub ccd_solver: CCDSolver,
+    /// 调试渲染管线
+    pub debug_pipeline: DebugRenderPipeline,
     /// 模拟是否正在运行
     pub is_running: bool,
 }
@@ -47,6 +50,10 @@ impl PhysicsManager {
             impulse_joint_set: ImpulseJointSet::new(),
             multibody_joint_set: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
+            debug_pipeline: DebugRenderPipeline::new(
+                DebugRenderStyle::default(),
+                DebugRenderMode::all(),
+            ),
             is_running: false,
         }
     }
@@ -159,5 +166,39 @@ impl PhysicsManager {
                 }
             }
         }
+    }
+
+    /// 提取物理世界的调试线框数据
+    pub fn render_debug_lines(&mut self) -> Vec<alander_render::pipelines::DebugVertex> {
+        let mut vertices = Vec::new();
+
+        self.debug_pipeline.render(
+            &mut DebugCollector { vertices: &mut vertices },
+            &self.rigid_body_set,
+            &self.collider_set,
+            &self.impulse_joint_set,
+            &self.multibody_joint_set,
+            &self.narrow_phase,
+        );
+
+        vertices
+    }
+}
+
+/// 内部结构，转换 Rapier3D 的调试线条到渲染器的顶点格式
+struct DebugCollector<'a> {
+    vertices: &'a mut Vec<alander_render::pipelines::DebugVertex>,
+}
+
+impl<'a> DebugRenderBackend for DebugCollector<'a> {
+    fn draw_line(&mut self, _object: DebugRenderObject, a: Point<f32>, b: Point<f32>, color: [f32; 4]) {
+        self.vertices.push(alander_render::pipelines::DebugVertex {
+            position: [a.x, a.y, a.z],
+            color,
+        });
+        self.vertices.push(alander_render::pipelines::DebugVertex {
+            position: [b.x, b.y, b.z],
+            color,
+        });
     }
 }

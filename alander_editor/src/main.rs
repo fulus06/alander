@@ -82,6 +82,8 @@ struct EditorState {
     selected_entity: Option<bevy_ecs::entity::Entity>,
     /// 轨道相机控制器
     orbit_controller: OrbitController,
+    /// 是否显示碰撞体
+    show_colliders: bool,
 }
 
 /// 轨道相机控制器
@@ -176,6 +178,7 @@ impl AlanderApp {
                     is_dragging: false,
                     last_mouse_pos: (0.0, 0.0),
                 },
+                show_colliders: false,
             },
             camera,
             camera_transform,
@@ -462,6 +465,14 @@ impl AlanderApp {
             
             // 同步 物理世界 -> ECS
             self.physics_manager.sync_physics_to_ecs(&mut scene.world);
+
+            // 如果开启了显示碰撞体，提取并更新调试线条
+            if self.editor_state.show_colliders {
+                let debug_lines = self.physics_manager.render_debug_lines();
+                self.renderer.update_debug_lines(&debug_lines);
+            } else {
+                self.renderer.update_debug_lines(&[]);
+            }
         }
 
         // 同步 ECS 中的 Transform 到渲染器中的模型矩阵，并同步包围盒与材质
@@ -664,6 +675,9 @@ impl AlanderApp {
                 ui.separator();
                 ui.label("重力:");
                 ui.add(egui::DragValue::new(&mut self.physics_manager.gravity.y).speed(0.1));
+                
+                ui.separator();
+                ui.checkbox(&mut self.editor_state.show_colliders, "显示碰撞体");
             });
         });
 
