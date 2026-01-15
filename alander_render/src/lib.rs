@@ -11,6 +11,7 @@ use winit::{
 
 pub mod pipelines;
 pub mod renderer;
+pub mod resource_manager;
 // pub mod shaders; // 暂时移除，后续添加
 pub mod texture;
 pub mod utils;
@@ -58,8 +59,8 @@ impl Default for RendererConfig {
     }
 }
 
-/// 渲染器资源
-pub struct Renderer {
+/// 渲染设备上下文
+pub struct DeviceContext {
     adapter: wgpu::Adapter,
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -70,7 +71,7 @@ pub struct Renderer {
     pipelines: pipelines::Pipelines,
 }
 
-impl Renderer {
+impl DeviceContext {
     /// 创建新的渲染器
     pub async fn new(window: &Window, config: RendererConfig) -> Result<Self, RenderError> {
         let size = window.inner_size();
