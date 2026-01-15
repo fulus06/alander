@@ -1,19 +1,17 @@
 use alander_core::{
-    scene::{Camera, Transform, BoundingBox, PointLight, RigidBodyType},
+    scene::{Camera, Transform, PointLight, RigidBodyType},
     InputState, RenderState, Time,
 };
-use alander_core::math::Ray;
 use alander_render::renderer::{Renderer, create_cube};
 use egui;
 use egui_dock;
-use glam::{Mat4, Vec3, Vec4Swizzles};
+use glam::{Mat4, Vec3};
 use uuid;
 use tracing::{info, Level};
 use winit::{
     event::{Event, WindowEvent, ElementState, MouseButton},
     event_loop::ControlFlow,
 };
-use bevy_ecs::entity::Entity; // Added for Entity type
 
 mod scene_manager;
 mod physics_manager;
@@ -384,69 +382,24 @@ impl AlanderApp {
         let window_size = self.window.inner_size();
         let scale_factor = self.window.scale_factor() as f32;
 
-        // 1. 获取视口区域（对应 handle_input 中的 hit-test 逻辑）
-        let viewport_left = 200.0 * scale_factor;
-        let viewport_top = 30.0 * scale_factor;
-        let viewport_right = window_size.width as f32 - 250.0 * scale_factor;
-        let viewport_width = viewport_right - viewport_left;
-        let viewport_height = window_size.height as f32 - viewport_top;
+        // 1. 对于全屏渲染的 3D 场景，我们需要基于整个窗口进行归一化坐标计算
+        // 这样 NDC 坐标 [ -1, 1 ] 才能正确对应相机矩阵
+        let x = mouse_pos.x / window_size.width as f32;
+        let y = mouse_pos.y / window_size.height as f32;
 
-        // 2. 转换鼠标坐标到视口空间 [0, 1]
-        let x = (mouse_pos.x - viewport_left) / viewport_width;
-        let y = (mouse_pos.y - viewport_top) / viewport_height;
+        // 3. 构建投影射线
+        // 这里直接调用 Renderer 提供的 screen_to_world_ray
+        // 传入的是归一化视口坐标 [0, 1]
+        let ray = self.renderer.screen_to_world_ray(glam::Vec2::new(x, y));
 
-        if x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0 {
-            tracing::debug!("鼠标不在 3D 视口内，不进行拾取");
-            return;
-        }
-
-        // 3. 转换到 NDC [-1, 1]
-        let ndc_x = x * 2.0 - 1.0;
-        let ndc_y = 1.0 - y * 2.0; // Y 轴翻转，NDC 中向上为正
-
-        let view = self.get_view_matrix();
-        let proj = self.camera.compute_projection_matrix();
-        
-        // 我们需要 inverse(proj * view)
-        let inv_vp = (proj * view).inverse();
-
-        // 4. 计算射线在世界空间的起点和终点
-        let ndc_near = glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
-        let ndc_far = glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
-
-        let world_near = inv_vp * ndc_near;
-        let world_far = inv_vp * ndc_far;
-
-        let world_near = world_near.xyz() / world_near.w;
-        let world_far = world_far.xyz() / world_far.w;
-
-        let ray_direction = (world_far - world_near).normalize();
-        let ray = Ray::new(world_near, ray_direction);
-
-        tracing::info!("发起射线采样: 起点 {:?}, 方向 {:?}", ray.origin, ray.direction);
-
-        // 5. 在 ECS 场景中进行遍历检测
-        let mut closest_entity = None;
-        let mut min_dist = f32::INFINITY;
-
-        if let Some(scene) = self.scene_manager.active_scene_mut() {
-            let mut query = scene.world.query::<(Entity, &BoundingBox)>();
-            for (entity, bbox) in query.iter(&scene.world) {
-                if let Some(dist) = ray.intersects_aabb(&bbox.world) {
-                    if dist < min_dist {
-                        min_dist = dist;
-                        closest_entity = Some(entity);
-                    }
-                }
-            }
-        }
-
-        if let Some(entity) = closest_entity {
-            tracing::info!("拾取到实体: {:?}", entity);
-            self.editor_state.selected_entity = Some(entity);
+        // 4. 利用物理系统进行射线检测
+        if let Some(hit_entity) = self.physics_manager.ray_cast(&ray) {
+            self.editor_state.selected_entity = Some(hit_entity);
+            tracing::info!("拾取到实体: {:?}", hit_entity);
         } else {
-            tracing::info!("未拾取到任何实体");
+            // 如果没点到东西，取消选中
             self.editor_state.selected_entity = None;
+            tracing::info!("未拾取到任何物体");
         }
     }
 

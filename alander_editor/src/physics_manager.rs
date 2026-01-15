@@ -31,6 +31,8 @@ pub struct PhysicsManager {
     pub ccd_solver: CCDSolver,
     /// 调试渲染管线
     pub debug_pipeline: DebugRenderPipeline,
+    /// 场景查询管线 (用于射线检测等)
+    pub query_pipeline: QueryPipeline,
     /// 模拟是否正在运行
     pub is_running: bool,
 }
@@ -54,11 +56,11 @@ impl PhysicsManager {
                 DebugRenderStyle::default(),
                 DebugRenderMode::all(),
             ),
+            query_pipeline: QueryPipeline::new(),
             is_running: false,
         }
     }
 
-    /// 执行物理步进
     pub fn step(&mut self) {
         if !self.is_running {
             return;
@@ -85,7 +87,7 @@ impl PhysicsManager {
     pub fn sync_ecs_to_physics(&mut self, world: &mut World) {
         let mut query = world.query::<(Entity, &Transform, &mut RigidBody, Option<&mut Collider>)>();
         
-        for (_entity, transform, mut rb, mut collider) in query.iter_mut(world) {
+        for (entity, transform, mut rb, mut collider) in query.iter_mut(world) {
             // 如果还没有物理句柄，则创建物理对象
             if rb.handle_index.is_none() {
                 let rb_type = match rb.body_type {
@@ -124,11 +126,21 @@ impl PhysicsManager {
                     let collider_obj = ColliderBuilder::new(shape)
                         .friction(col.friction)
                         .restitution(col.restitution)
+                        .user_data(entity.to_bits() as u128) // 存储 ECS Entity ID
                         .build();
                     
                     let col_handle = self.collider_set.insert_with_parent(collider_obj, handle, &mut self.rigid_body_set);
                     col.handle_index = Some(col_handle.into_raw_parts().0);
                     col.handle_generation = Some(col_handle.into_raw_parts().1);
+                } else {
+                    // 如果碰撞体已经存在，确保其 user_data 是最新的 (防止旧碰撞体无法拾取)
+                    let col_handle = ColliderHandle::from_raw_parts(
+                        collider.as_ref().unwrap().handle_index.unwrap(),
+                        collider.as_ref().unwrap().handle_generation.unwrap()
+                    );
+                    if let Some(col_obj) = self.collider_set.get_mut(col_handle) {
+                        col_obj.user_data = entity.to_bits() as u128;
+                    }
                 }
             } else {
                 // 如果模拟没运行，允许从 Transform 同步到物理引擎（手动编辑模式）
@@ -145,6 +157,9 @@ impl PhysicsManager {
                 }
             }
         }
+
+        // 重要：同步完成后必须更新查询管线，否则射线检测会滞后一帧或使用旧位置
+        self.query_pipeline.update(&self.rigid_body_set, &self.collider_set);
     }
 
     /// 将物理世界的结果同步回 ECS Transform
@@ -166,6 +181,40 @@ impl PhysicsManager {
                 }
             }
         }
+    }
+
+    /// 执行射线投射，检测鼠标选中的物体
+    pub fn ray_cast(&self, ray: &alander_core::math::Ray) -> Option<Entity> {
+        let rapier_ray = Ray::new(
+            Point::new(ray.origin.x, ray.origin.y, ray.origin.z),
+            Vector::new(ray.direction.x, ray.direction.y, ray.direction.z),
+        );
+
+        // 设置最大检测距离
+        let max_toi = 1000.0;
+        let solid = true;
+        let filter = QueryFilter::default();
+
+        if let Some((handle, toi)) = self.query_pipeline.cast_ray(
+            &self.rigid_body_set,
+            &self.collider_set,
+            &rapier_ray,
+            max_toi,
+            solid,
+            filter,
+        ) {
+            tracing::info!("射线命中: {:?}, 距离: {}", handle, toi);
+            
+            // 从 Collider 中取回 Entity ID
+            if let Some(collider) = self.collider_set.get(handle) {
+                let entity_bits = collider.user_data as u64;
+                if entity_bits != 0 {
+                    return Some(Entity::from_bits(entity_bits));
+                }
+            }
+        }
+
+        None
     }
 
     /// 提取物理世界的调试线框数据

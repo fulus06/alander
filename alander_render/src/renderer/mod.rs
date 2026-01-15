@@ -64,6 +64,10 @@ pub struct Renderer {
     debug_vertex_buffer: Option<wgpu::Buffer>,
     /// 调试顶点数量
     debug_vertex_count: u32,
+    /// 当前视图矩阵 (用于 CPU 侧计算)
+    pub view_matrix: cgmath::Matrix4<f32>,
+    /// 当前投影矩阵 (用于 CPU 侧计算)
+    pub proj_matrix: cgmath::Matrix4<f32>,
 }
 
 impl Renderer {
@@ -262,6 +266,8 @@ impl Renderer {
             skybox_camera_bind_group,
             debug_vertex_buffer: None,
             debug_vertex_count: 0,
+            view_matrix: cgmath::Matrix4::identity(),
+            proj_matrix: cgmath::Matrix4::identity(),
         })
     }
 
@@ -279,6 +285,10 @@ impl Renderer {
     pub fn update_camera(&mut self, camera: &CoreCamera, transform: &Transform) {
         let view = Self::calc_view_matrix(transform);
         let proj = Self::calc_proj_matrix(camera);
+        
+        self.view_matrix = view;
+        self.proj_matrix = proj;
+
         let camera_buffer = CameraBuffer::new(view, proj, transform.position.into());
 
         // 调试信息：相机更新
@@ -289,6 +299,38 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&camera_buffer),
         );
+    }
+
+    /// 将屏幕坐标转换为世界空间射线
+    /// screen_pos: [0, 1] 范围的归一化屏幕坐标 (或像素坐标，取决于调用者)
+    /// 这里约定传入的是 [0, 1] 范围
+    pub fn screen_to_world_ray(&self, screen_pos: glam::Vec2) -> alander_core::math::Ray {
+        use cgmath::SquareMatrix;
+
+        // 1. 将 [0, 1] 转换为 NDC [-1, 1]
+        // 注意：Y轴在屏幕空间通常向下，但在 NDC 向上
+        let ndc_x = screen_pos.x * 2.0 - 1.0;
+        let ndc_y = (1.0 - screen_pos.y) * 2.0 - 1.0;
+
+        // 2. 构造 NDC 近平面和远平面点
+        // 注意：cgmath::perspective 产生的是 OpenGL 风格矩阵 (Z 范围 [-1, 1])
+        let ndc_near = cgmath::Vector4::new(ndc_x, ndc_y, -1.0, 1.0);
+        let ndc_far = cgmath::Vector4::new(ndc_x, ndc_y, 1.0, 1.0);
+
+        // 3. 计算 逆转换矩阵
+        // 注意：WGPU 的投影矩阵包含了深度范围的调整，这里我们需要使用原始的 Proj * View
+        let inv_view_proj = (self.proj_matrix * self.view_matrix).invert().unwrap();
+
+        // 4. 转换到世界空间
+        let world_near_h = inv_view_proj * ndc_near;
+        let world_far_h = inv_view_proj * ndc_far;
+
+        // 5. 透视除法
+        let world_near = glam::Vec3::new(world_near_h.x / world_near_h.w, world_near_h.y / world_near_h.w, world_near_h.z / world_near_h.w);
+        let world_far = glam::Vec3::new(world_far_h.x / world_far_h.w, world_far_h.y / world_far_h.w, world_far_h.z / world_far_h.w);
+
+        // 6. 构造射线
+        alander_core::math::Ray::new(world_near, (world_far - world_near).normalize())
     }
 
     /// 获取渲染管线
