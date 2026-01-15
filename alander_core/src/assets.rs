@@ -88,31 +88,55 @@ impl AssetLoader<crate::scene::MeshData> for SimpleMeshLoader {
     fn load(&mut self, source: &str) -> Result<crate::scene::MeshData, AssetError> {
         // 简化实现：创建默认立方体
         if source == "cube" {
+            use crate::scene::Vertex;
+            use glam::{Vec3, Vec2, Vec4};
+
+            let vertices = vec![
+                // 前面 (Front)
+                Vertex::with_tangent(Vec3::new(-0.5, -0.5,  0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(0.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5, -0.5,  0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(1.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5,  0.5,  0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(1.0, 1.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new(-0.5,  0.5,  0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(0.0, 1.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                // 后面 (Back)
+                Vertex::with_tangent(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(0.0, 0.0), Vec4::new(-1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5, -0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(1.0, 0.0), Vec4::new(-1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5,  0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(1.0, 1.0), Vec4::new(-1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new(-0.5,  0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(0.0, 1.0), Vec4::new(-1.0, 0.0, 0.0, 1.0)),
+                // 左面 (Left)
+                Vertex::with_tangent(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(-1.0, 0.0, 0.0), Vec2::new(0.0, 0.0), Vec4::new(0.0, 0.0, 1.0, 1.0)),
+                Vertex::with_tangent(Vec3::new(-0.5, -0.5,  0.5), Vec3::new(-1.0, 0.0, 0.0), Vec2::new(1.0, 0.0), Vec4::new(0.0, 0.0, 1.0, 1.0)),
+                Vertex::with_tangent(Vec3::new(-0.5,  0.5,  0.5), Vec3::new(-1.0, 0.0, 0.0), Vec2::new(1.0, 1.0), Vec4::new(0.0, 0.0, 1.0, 1.0)),
+                Vertex::with_tangent(Vec3::new(-0.5,  0.5, -0.5), Vec3::new(-1.0, 0.0, 0.0), Vec2::new(0.0, 1.0), Vec4::new(0.0, 0.0, 1.0, 1.0)),
+                // 右面 (Right)
+                Vertex::with_tangent(Vec3::new( 0.5, -0.5,  0.5), Vec3::new( 1.0, 0.0, 0.0), Vec2::new(0.0, 0.0), Vec4::new(0.0, 0.0, -1.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5, -0.5, -0.5), Vec3::new( 1.0, 0.0, 0.0), Vec2::new(1.0, 0.0), Vec4::new(0.0, 0.0, -1.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5,  0.5, -0.5), Vec3::new( 1.0, 0.0, 0.0), Vec2::new(1.0, 1.0), Vec4::new(0.0, 0.0, -1.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5,  0.5,  0.5), Vec3::new( 1.0, 0.0, 0.0), Vec2::new(0.0, 1.0), Vec4::new(0.0, 0.0, -1.0, 1.0)),
+                // 上面 (Top)
+                Vertex::with_tangent(Vec3::new(-0.5,  0.5,  0.5), Vec3::new( 0.0, 1.0, 0.0), Vec2::new(0.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5,  0.5,  0.5), Vec3::new( 0.0, 1.0, 0.0), Vec2::new(1.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5,  0.5, -0.5), Vec3::new( 0.0, 1.0, 0.0), Vec2::new(1.0, 1.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new(-0.5,  0.5, -0.5), Vec3::new( 0.0, 1.0, 0.0), Vec2::new(0.0, 1.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                // 下面 (Bottom)
+                Vertex::with_tangent(Vec3::new(-0.5, -0.5, -0.5), Vec3::new( 0.0, -1.0, 0.0), Vec2::new(0.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5, -0.5, -0.5), Vec3::new( 0.0, -1.0, 0.0), Vec2::new(1.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new( 0.5, -0.5,  0.5), Vec3::new( 0.0, -1.0, 0.0), Vec2::new(1.0, 1.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+                Vertex::with_tangent(Vec3::new(-0.5, -0.5,  0.5), Vec3::new( 0.0, -1.0, 0.0), Vec2::new(0.0, 1.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+            ];
+
+            let indices = vec![
+                0, 1, 2, 2, 3, 0,       // 前面
+                4, 7, 6, 6, 5, 4,       // 后面 (CW to be visible from outside)
+                8, 9, 10, 10, 11, 8,    // 左面
+                12, 13, 14, 14, 15, 12, // 右面
+                16, 17, 18, 18, 19, 16, // 上面
+                20, 21, 22, 22, 23, 20, // 下面
+            ];
+
             Ok(crate::scene::MeshData {
                 name: "Cube".to_string(),
-                vertices: vec![
-                    crate::scene::Vertex::new(
-                        glam::Vec3::new(-0.5, -0.5, -0.5),
-                        glam::Vec3::new(0.0, 0.0, -1.0),
-                        glam::Vec2::new(0.0, 0.0),
-                    ),
-                    crate::scene::Vertex::new(
-                        glam::Vec3::new(0.5, -0.5, -0.5),
-                        glam::Vec3::new(0.0, 0.0, -1.0),
-                        glam::Vec2::new(1.0, 0.0),
-                    ),
-                    crate::scene::Vertex::new(
-                        glam::Vec3::new(0.5, 0.5, -0.5),
-                        glam::Vec3::new(0.0, 0.0, -1.0),
-                        glam::Vec2::new(1.0, 1.0),
-                    ),
-                    crate::scene::Vertex::new(
-                        glam::Vec3::new(-0.5, 0.5, -0.5),
-                        glam::Vec3::new(0.0, 0.0, -1.0),
-                        glam::Vec2::new(0.0, 1.0),
-                    ),
-                ],
-                indices: vec![0, 1, 2, 2, 3, 0],
+                vertices,
+                indices,
             })
         } else {
             Err(AssetError::NotFound(format!("网格 '{}' 未找到", source)))
