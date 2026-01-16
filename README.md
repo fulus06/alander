@@ -4,8 +4,7 @@
 
 Alander is a modern 3D creation suite (DCC, Digital Content Creation) developed based on Rust, aiming to become a strong competitor to Blender.
 
-<video src="./doc/alander003%20-%20物理引擎+层级.mp4"></video>
-
+[![Watch the video](https://i.sstatic.net/Vp2cE.png)](./doc/alander003%20-%20物理引擎+层级.mp4)
 ## Project Vision
 
 Alander is not merely a 3D software, but rather a "future-oriented procedural 3D engine" with the following core differentiating features: 
