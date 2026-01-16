@@ -86,7 +86,13 @@ impl Scene {
     
     /// 设置父子关系，并保持世界坐标不变
     pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) {
-        // 0. 计算当子节点前的世界变换 (用于保持位置)
+        // 防止自循环或冗余操作
+        if Some(child) == parent { return; }
+        
+        let current_parent = self.world.get::<Parent>(child).map(|p| p.0);
+        if current_parent == parent { return; }
+
+        // 0. 计算子节点当前的世界变换 (用于保持位置)
         let child_global = self.world.get::<GlobalTransform>(child)
             .map(|gt| gt.0)
             .unwrap_or_else(|| {

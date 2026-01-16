@@ -129,7 +129,7 @@ impl GizmoManager {
 
     fn pick_gizmo_hierarchical(
         &self, 
-        ray: &Ray, 
+        _ray: &Ray, 
         world_pos: Vec3, 
         scale: f32, 
         mouse_pos: Vec2, 
