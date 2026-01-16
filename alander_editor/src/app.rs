@@ -636,9 +636,13 @@ impl AlanderApp {
                     self.command_manager.redo(scene, &mut self.renderer);
                 }
             }
+            MenuAction::OpenScene => self.on_file_open(),
+            MenuAction::SaveScene => self.on_file_save(),
+            MenuAction::ImportModel => self.on_import_model(),
+            MenuAction::ImportHdr => self.on_import_hdr_environment(),
             MenuAction::ResetCamera => self.reset_camera(),
             MenuAction::Exit => self.running = false,
-            _ => {}
+            MenuAction::None => {}
         }
     }
 
