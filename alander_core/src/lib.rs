@@ -478,6 +478,133 @@ pub mod scene {
         pub width: f32,
         pub height: f32,
     }
+
+    /// 关键帧数据
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Keyframe<T> {
+        pub time: f32,
+        pub value: T,
+    }
+
+    /// 动画轨道
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AnimationTrack<T> {
+        pub keyframes: Vec<Keyframe<T>>,
+    }
+
+    impl AnimationTrack<glam::Vec3> {
+        pub fn sample_vec3(&self, time: f32) -> Option<glam::Vec3> {
+            if self.keyframes.is_empty() { return None; }
+            if time <= self.keyframes[0].time { return Some(self.keyframes[0].value); }
+            if time >= self.keyframes.last().unwrap().time { return Some(self.keyframes.last().unwrap().value); }
+
+            for i in 0..self.keyframes.len() - 1 {
+                let k1 = &self.keyframes[i];
+                let k2 = &self.keyframes[i+1];
+                if time >= k1.time && time < k2.time {
+                    let factor = (time - k1.time) / (k2.time - k1.time);
+                    return Some(k1.value.lerp(k2.value, factor));
+                }
+            }
+            None
+        }
+    }
+
+    impl AnimationTrack<glam::Quat> {
+        pub fn sample_quat(&self, time: f32) -> Option<glam::Quat> {
+            if self.keyframes.is_empty() { return None; }
+            if time <= self.keyframes[0].time { return Some(self.keyframes[0].value); }
+            if time >= self.keyframes.last().unwrap().time { return Some(self.keyframes.last().unwrap().value); }
+
+            for i in 0..self.keyframes.len() - 1 {
+                let k1 = &self.keyframes[i];
+                let k2 = &self.keyframes[i+1];
+                if time >= k1.time && time < k2.time {
+                    let factor = (time - k1.time) / (k2.time - k1.time);
+                    return Some(k1.value.slerp(k2.value, factor));
+                }
+            }
+            None
+        }
+    }
+
+    impl<T> AnimationTrack<T> {
+        pub fn new(keyframes: Vec<Keyframe<T>>) -> Self {
+            Self { keyframes }
+        }
+    }
+
+    /// 动画剪辑资源
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AnimationClip {
+        pub name: String,
+        pub duration: f32,
+        pub position_track: Option<AnimationTrack<Vec3>>,
+        pub rotation_track: Option<AnimationTrack<Quat>>,
+        pub scale_track: Option<AnimationTrack<Vec3>>,
+    }
+
+    impl AnimationClip {
+        pub fn new(name: String) -> Self {
+            Self {
+                name,
+                duration: 0.0,
+                position_track: None,
+                rotation_track: None,
+                scale_track: None,
+            }
+        }
+
+        /// 更新时长 (基于所有轨道的最大时间点)
+        pub fn update_duration(&mut self) {
+            let mut max_time = 0.0f32;
+            if let Some(track) = &self.position_track {
+                for kf in &track.keyframes { max_time = max_time.max(kf.time); }
+            }
+            if let Some(track) = &self.rotation_track {
+                for kf in &track.keyframes { max_time = max_time.max(kf.time); }
+            }
+            if let Some(track) = &self.scale_track {
+                for kf in &track.keyframes { max_time = max_time.max(kf.time); }
+            }
+            self.duration = max_time;
+        }
+    }
+
+    /// 动画播放器组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize)]
+    pub struct AnimationPlayer {
+        pub clips: Vec<AnimationClip>,
+        pub active_clip_index: Option<usize>,
+        pub current_time: f32,
+        pub playback_speed: f32,
+        pub is_playing: bool,
+        pub loop_enabled: bool,
+    }
+
+    impl Default for AnimationPlayer {
+        fn default() -> Self {
+            Self {
+                clips: Vec::new(),
+                active_clip_index: None,
+                current_time: 0.0,
+                playback_speed: 1.0,
+                is_playing: true,
+                loop_enabled: true,
+            }
+        }
+    }
+
+    impl AnimationPlayer {
+        /// 播放指定索引的剪辑
+        pub fn play(&mut self, index: usize) {
+            if index < self.clips.len() {
+                self.active_clip_index = Some(index);
+                self.current_time = 0.0;
+                self.is_playing = true;
+            }
+        }
+    }
 }
 
 /// 时间系统

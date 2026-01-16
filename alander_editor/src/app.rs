@@ -257,7 +257,9 @@ impl AlanderApp {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if *button == MouseButton::Left && *state == ElementState::Pressed && is_in_viewport {
+                let egui_wants_input = self.egui_context.wants_pointer_input();
+                
+                if *button == MouseButton::Left && *state == ElementState::Pressed && is_in_viewport && !egui_wants_input {
                     // 如果鼠标下有 Gizmo，不进行场景拾取
                     if self.gizmo_manager.hovered_axis.is_none() {
                         self.pick_entity();
@@ -265,7 +267,7 @@ impl AlanderApp {
                 }
                 self.input.mouse_buttons.insert(*button, *state);
                 
-                if is_in_viewport {
+                if is_in_viewport && !egui_wants_input {
                     if *button == MouseButton::Middle {
                         self.editor_state.orbit_controller.is_dragging = *state == ElementState::Pressed;
                         if *state == ElementState::Pressed {
@@ -400,6 +402,9 @@ impl AlanderApp {
                     self.command_manager.execute(Box::new(cmd), scene, &mut self.renderer);
                 }
             }
+
+            // 1.5 更新动画系统
+            update_animations(scene, delta_time);
 
             // 2. 将逻辑变更同步到物理世界并执行步进
             self.physics_manager.integration_parameters.dt = delta_time;
@@ -734,6 +739,47 @@ impl AlanderApp {
 
     fn update_camera_transform(&mut self) {
         self.editor_state.orbit_controller.update_transform(&mut self.camera_transform);
+    }
+
+}
+
+/// 更新所有识体的动画系统 (独立于 AlanderApp 以避免借用冲突)
+fn update_animations(scene: &mut Scene, delta_time: f32) {
+    use alander_core::scene::AnimationPlayer;
+
+    let mut query = scene.world.query::<(&mut AnimationPlayer, &mut Transform)>();
+    for (mut player, mut transform) in query.iter_mut(&mut scene.world) {
+        if !player.is_playing { continue; }
+
+        if let Some(active_idx) = player.active_clip_index {
+            // 首先计算时长信息，而不持有 clip 的长期引用
+            let duration = player.clips.get(active_idx).map(|c| c.duration).unwrap_or(0.0);
+            
+            // 更新时间并处理循环/停止
+            let mut new_time = player.current_time + delta_time * player.playback_speed;
+            if player.loop_enabled && duration > 0.0 {
+                new_time %= duration;
+            } else if new_time > duration {
+                new_time = duration;
+                player.is_playing = false;
+            }
+            player.current_time = new_time;
+
+            // 再次借用 clip 进行采样
+            if let Some(clip) = player.clips.get(active_idx) {
+                let t = player.current_time;
+
+                if let Some(track) = &clip.position_track {
+                    if let Some(pos) = track.sample_vec3(t) { transform.position = pos; }
+                }
+                if let Some(track) = &clip.rotation_track {
+                    if let Some(rot) = track.sample_quat(t) { transform.rotation = rot; }
+                }
+                if let Some(track) = &clip.scale_track {
+                    if let Some(scale) = track.sample_vec3(t) { transform.scale = scale; }
+                }
+            }
+        }
     }
 }
 

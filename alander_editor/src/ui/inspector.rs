@@ -1,7 +1,7 @@
 use egui;
 use bevy_ecs::prelude::*;
 use crate::scene_manager::Scene;
-use alander_core::scene::{Name, Transform, PointLight, PBRMaterial, RigidBody, Collider, RigidBodyType, Camera, Projection};
+use alander_core::scene::{Name, Transform, PointLight, PBRMaterial, RigidBody, Collider, RigidBodyType, Camera, Projection, AnimationPlayer};
 use glam::{EulerRot, Vec3, Vec4, Quat};
 use crate::app::EditorState;
 
@@ -214,5 +214,67 @@ pub fn show_inspector(
                 }
             }
         });
+    }
+
+    // 8. 动画播放器 (AnimationPlayer) 编辑
+    let current_transform = scene.world.get::<Transform>(entity).cloned();
+    
+    if let Some(mut player) = scene.world.get_mut::<AnimationPlayer>(entity) {
+        ui.collapsing("动画 (Animation)", |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("添加新剪辑").clicked() {
+                    player.clips.push(alander_core::scene::AnimationClip::new("New Clip".to_string()));
+                }
+            });
+
+            for i in 0..player.clips.len() {
+                // 我们在循环内部处理 active_clip_index 的设置，避免同时借用 clip 和 player
+                let mut name = player.clips[i].name.clone();
+                let duration = player.clips[i].duration;
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui.text_edit_singleline(&mut name).changed() {
+                            player.clips[i].name = name;
+                        }
+                        if ui.button("选择").clicked() {
+                            player.active_clip_index = Some(i);
+                        }
+                    });
+                    ui.label(format!("时长: {:.2}s", duration));
+                });
+            }
+
+            if let Some(clip_idx) = player.active_clip_index {
+                ui.separator();
+                ui.label("当前选中剪辑控制");
+                if let Some(transform) = current_transform {
+                    if ui.button("捕捉当前 Transform 为关键帧").clicked() {
+                        let time = player.current_time;
+                        let clip = &mut player.clips[clip_idx];
+                        
+                        // 捕捉位置
+                        let pos_track = clip.position_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
+                        pos_track.keyframes.push(alander_core::scene::Keyframe { time, value: transform.position });
+                        pos_track.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+                        
+                        // 捕捉旋转
+                        let rot_track = clip.rotation_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
+                        rot_track.keyframes.push(alander_core::scene::Keyframe { time, value: transform.rotation });
+                        rot_track.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+
+                        // 捕捉缩放
+                        let sca_track = clip.scale_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
+                        sca_track.keyframes.push(alander_core::scene::Keyframe { time, value: transform.scale });
+                        sca_track.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+
+                        clip.update_duration();
+                    }
+                }
+            }
+        });
+    } else {
+         if ui.button("➕ 添加动画组件").clicked() {
+             scene.world.entity_mut(entity).insert(AnimationPlayer::default());
+         }
     }
 }

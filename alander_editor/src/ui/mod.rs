@@ -2,6 +2,7 @@ pub mod hierarchy;
 pub mod inspector;
 pub mod menu_bar;
 pub mod simulation_bar;
+pub mod timeline;
 
 pub use menu_bar::MenuAction;
 
@@ -49,6 +50,15 @@ impl EditorUI {
                 frame_time,
             );
         });
+        
+        egui::TopBottomPanel::bottom("timeline_panel")
+            .resizable(true)
+            .default_height(100.0)
+            .show(ctx, |ui| {
+                if let Some(scene) = scene_manager.active_scene_mut() {
+                    timeline::show_timeline(ui, scene, editor_state.selected_entity);
+                }
+            });
 
         // 3. 左侧场景面板
         egui::SidePanel::left("scene_panel")
