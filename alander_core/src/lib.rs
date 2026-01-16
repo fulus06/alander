@@ -305,6 +305,17 @@ pub mod scene {
         pub sub_asset: Option<String>,
     }
 
+    /// 脚本组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct Script {
+        /// 脚本代码
+        pub code: String,
+        /// 是否激活
+        pub active: bool,
+        /// 最后一次运行错误
+        pub last_error: Option<String>,
+    }
+
     /// PBR 材质组件
     #[derive(Component, Debug, Clone, Serialize, Deserialize)]
     pub struct PBRMaterial {

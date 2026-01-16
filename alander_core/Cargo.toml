@@ -15,6 +15,7 @@ thiserror = "1.0"
 gltf = "1.4"
 image = "0.24"
 rapier3d = { workspace = true }
+rhai = { version = "1.16", features = ["sync", "serde"] }
 
 [features]
 test = []

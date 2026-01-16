@@ -5,6 +5,7 @@ pub mod camera_controller;
 pub mod ui;
 pub mod app;
 pub mod editor_command;
+pub mod script_manager;
 
 use app::AlanderApp;
 use winit::{

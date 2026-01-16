@@ -17,6 +17,7 @@ use crate::camera_controller::OrbitController;
 use crate::ui::{EditorUI, MenuAction};
 use crate::editor_command::CommandManager;
 use sysinfo::{System, SystemExt, ProcessExt};
+use crate::script_manager::ScriptManager;
 
 /// 编辑器状态
 pub struct EditorState {
@@ -108,6 +109,9 @@ pub struct AlanderApp {
 
     /// 系统信息 (供统计使用)
     pub system_info: System,
+
+    /// 脚本管理器
+    pub script_manager: ScriptManager,
 }
 
 impl AlanderApp {
@@ -190,6 +194,7 @@ impl AlanderApp {
             fps_update_timer: 0.0,
             displayed_delta_time: 0.0,
             system_info: System::new_all(),
+            script_manager: ScriptManager::new(),
         };
 
         // 完成后续初始化
@@ -362,6 +367,11 @@ impl AlanderApp {
             
             self.displayed_delta_time = delta_time;
             self.fps_update_timer = 0.0;
+        }
+
+        // 运行脚本
+        if let Some(mut scene) = self.scene_manager.active_scene_mut() {
+            self.script_manager.update_scripts(&mut scene, delta_time);
         }
 
         if let Some(scene) = self.scene_manager.active_scene_mut() {

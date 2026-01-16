@@ -1,7 +1,7 @@
 use egui;
 use bevy_ecs::prelude::*;
 use crate::scene_manager::Scene;
-use alander_core::scene::{Name, Transform, PointLight, PBRMaterial, RigidBody, Collider, RigidBodyType, Camera, Projection, AnimationPlayer};
+use alander_core::scene::{Name, Transform, PointLight, PBRMaterial, RigidBody, Collider, RigidBodyType, Camera, Projection, AnimationPlayer, Script};
 use glam::{EulerRot, Vec3, Vec4, Quat};
 use crate::app::EditorState;
 
@@ -141,6 +141,39 @@ pub fn show_inspector(
                 }
             });
         });
+    }
+
+    // 7. 脚本 (Script) 编辑
+    let mut script_query = scene.world.query::<&mut Script>();
+    if let Ok(mut script) = script_query.get_mut(&mut scene.world, entity) {
+        ui.collapsing("脚本 (Script)", |ui| {
+            ui.checkbox(&mut script.active, "激活脚本");
+            
+            if let Some(err) = &script.last_error {
+                ui.colored_label(egui::Color32::RED, format!("错误: {}", err));
+            }
+
+            ui.label("脚本代码:");
+            let editor = egui::TextEdit::multiline(&mut script.code)
+                .font(egui::TextStyle::Monospace)
+                .code_editor()
+                .desired_width(f32::INFINITY)
+                .lock_focus(true);
+            
+            if ui.add(editor).changed() {
+                // 代码修改时重置运行错误
+                script.last_error = None;
+            }
+        });
+    } else {
+        // 如果没有脚本组件，提供一个添加按钮
+        if ui.button("➕ 添加脚本组件").clicked() {
+            scene.world.entity_mut(entity).insert(Script {
+                code: "transform.scale.x = 1.0 + (dt * 10.0).sin();".to_string(),
+                active: true,
+                ..Default::default()
+            });
+        }
     }
 
     // 5. 刚体 (RigidBody) 编辑
