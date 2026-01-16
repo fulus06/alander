@@ -2,11 +2,15 @@ use alander_core::scene::{Name, Children, Parent};
 use bevy_ecs::prelude::*;
 use crate::scene_manager::Scene;
 use crate::app::EditorState;
+use crate::editor_command::{CommandManager, ReparentCommand};
+use alander_render::renderer::Renderer;
 
 /// 渲染场景大纲面板
 pub fn show_hierarchy(
     ui: &mut egui::Ui,
     scene: &mut Scene,
+    renderer: &mut Renderer,
+    command_manager: &mut CommandManager,
     editor_state: &mut EditorState,
 ) {
     ui.heading("场景层级");
@@ -58,10 +62,14 @@ pub fn show_hierarchy(
         editor_state.dragged_entity = None;
     }
 
-    // 延迟执行层级变更，避免在遍历时修改 ECS
-    if let Some((child, parent)) = reparent_req {
-        scene.set_parent(child, parent);
-        scene.update_hierarchy();
+    // 延迟执行层级变更，提交为命令
+    if let Some((child, new_parent)) = reparent_req {
+        let old_parent = scene.world.get::<Parent>(child).map(|p| p.0);
+        if old_parent != new_parent {
+            let cmd = ReparentCommand::new(child, old_parent, new_parent);
+            command_manager.execute(Box::new(cmd), scene, renderer);
+            scene.update_hierarchy();
+        }
     }
 }
 

@@ -52,7 +52,7 @@ impl GizmoManager {
         }
     }
 
-    /// 更新 Gizmo 逻辑
+    /// 更新 Gizmo 逻辑，如果拖拽完成，不仅更新变换，还返回拖拽开始前的初始变换用于撤销系统
     pub fn update(
         &mut self,
         ray: &Ray,
@@ -63,20 +63,20 @@ impl GizmoManager {
         selected_entity: Option<Entity>,
         world: &mut World,
         camera_pos: Vec3,
-    ) {
+    ) -> Option<Transform> {
         let selected_entity = match selected_entity {
             Some(e) => e,
             None => {
                 self.hovered_axis = None;
                 self.active_axis = None;
-                return;
+                return None;
             }
         };
 
         // 获取实体当前的变换
         let mut transform = match world.get::<Transform>(selected_entity) {
             Some(t) => *t,
-            None => return,
+            None => return None,
         };
 
         // 获取实体的世界变换和父节点信息
@@ -100,7 +100,7 @@ impl GizmoManager {
             // 正在拖拽中
             if !is_mouse_pressed {
                 self.active_axis = None;
-                return;
+                return self.initial_transform.take();
             }
 
             // 执行拖拽逻辑 (传入世界位置作为参考)
@@ -125,6 +125,7 @@ impl GizmoManager {
                 }
             }
         }
+        None
     }
 
     fn pick_gizmo_hierarchical(

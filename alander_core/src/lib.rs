@@ -503,6 +503,10 @@ impl Default for Time {
 pub struct InputState {
     /// 当前帧键盘按键状态
     pub keyboard: HashMap<winit::event::VirtualKeyCode, winit::event::ElementState>,
+    /// 仅在当前帧刚按下的键
+    pub just_pressed: std::collections::HashSet<winit::event::VirtualKeyCode>,
+    /// 仅在当前帧刚释放的键
+    pub just_released: std::collections::HashSet<winit::event::VirtualKeyCode>,
     /// 当前帧鼠标按键状态
     pub mouse_buttons: HashMap<winit::event::MouseButton, winit::event::ElementState>,
     /// 鼠标位置
@@ -520,12 +524,24 @@ impl InputState {
             .unwrap_or(false)
     }
 
+    /// 检查键是否在这一帧刚按下
+    pub fn key_just_pressed(&self, key: winit::event::VirtualKeyCode) -> bool {
+        self.just_pressed.contains(&key)
+    }
+
     /// 检查鼠标键是否按下
     pub fn mouse_button_pressed(&self, button: winit::event::MouseButton) -> bool {
         self.mouse_buttons
             .get(&button)
             .map(|&state| state == winit::event::ElementState::Pressed)
             .unwrap_or(false)
+    }
+
+    /// 清理每一帧的瞬时状态 (在每帧结束时调用)
+    pub fn clear_frame_state(&mut self) {
+        self.just_pressed.clear();
+        self.just_released.clear();
+        self.mouse_scroll_delta = Vec2::ZERO;
     }
 }
 

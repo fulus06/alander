@@ -27,6 +27,8 @@ impl EditorUI {
         scene_manager: &mut SceneManager,
         physics_manager: &mut PhysicsManager,
         gizmo_manager: &mut GizmoManager,
+        renderer: &mut alander_render::renderer::Renderer,
+        command_manager: &mut crate::editor_command::CommandManager,
         editor_state: &mut EditorState,
         frame_time: f32,
     ) -> MenuAction {
@@ -34,7 +36,7 @@ impl EditorUI {
 
         // 1. 顶部菜单栏
         egui::TopBottomPanel::top("top_menu").show(ctx, |ui| {
-            menu_action = menu_bar::show_menu_bar(ui);
+            menu_action = menu_bar::show_menu_bar(ui, command_manager);
         });
 
         // 2. 底部模拟控制栏
@@ -54,7 +56,7 @@ impl EditorUI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 if let Some(scene) = scene_manager.active_scene_mut() {
-                    hierarchy::show_hierarchy(ui, scene, editor_state);
+                    hierarchy::show_hierarchy(ui, scene, renderer, command_manager, editor_state);
                 }
             });
 

@@ -1,4 +1,5 @@
 use egui;
+use crate::editor_command::CommandManager;
 
 /// UI 操作响应
 pub enum MenuAction {
@@ -7,12 +8,14 @@ pub enum MenuAction {
     SaveScene,
     ImportModel,
     ImportHdr,
+    Undo,
+    Redo,
     ResetCamera,
     Exit,
 }
 
 /// 渲染顶部菜单栏
-pub fn show_menu_bar(ui: &mut egui::Ui) -> MenuAction {
+pub fn show_menu_bar(ui: &mut egui::Ui, command_manager: &CommandManager) -> MenuAction {
     let mut action = MenuAction::None;
     
     egui::menu::bar(ui, |ui| {
@@ -37,6 +40,28 @@ pub fn show_menu_bar(ui: &mut egui::Ui) -> MenuAction {
             ui.separator();
             if ui.button("退出").clicked() {
                 action = MenuAction::Exit;
+                ui.close_menu();
+            }
+        });
+
+        ui.menu_button("编辑", |ui| {
+            let undo_label = if let Some(name) = command_manager.last_undo_name() {
+                format!("撤销 ({})", name)
+            } else {
+                "撤销".to_string()
+            };
+            if ui.add_enabled(command_manager.can_undo(), egui::Button::new(format!("{} (Ctrl+Z)", undo_label))).clicked() {
+                action = MenuAction::Undo;
+                ui.close_menu();
+            }
+
+            let redo_label = if let Some(name) = command_manager.last_redo_name() {
+                format!("重做 ({})", name)
+            } else {
+                "重做".to_string()
+            };
+            if ui.add_enabled(command_manager.can_redo(), egui::Button::new(format!("{} (Ctrl+Shift+Z)", redo_label))).clicked() {
+                action = MenuAction::Redo;
                 ui.close_menu();
             }
         });

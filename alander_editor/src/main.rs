@@ -1,9 +1,10 @@
-mod scene_manager;
-mod physics_manager;
-mod gizmo_manager;
-mod camera_controller;
-mod ui;
-mod app;
+pub mod scene_manager;
+pub mod physics_manager;
+pub mod gizmo_manager;
+pub mod camera_controller;
+pub mod ui;
+pub mod app;
+pub mod editor_command;
 
 use app::AlanderApp;
 use winit::{

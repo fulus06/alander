@@ -14,6 +14,7 @@ use crate::physics_manager::PhysicsManager;
 use crate::gizmo_manager::{GizmoManager, GizmoMode};
 use crate::camera_controller::OrbitController;
 use crate::ui::{EditorUI, MenuAction};
+use crate::editor_command::CommandManager;
 
 /// 编辑器状态
 pub struct EditorState {
@@ -37,6 +38,9 @@ pub struct AlanderApp {
 
     /// 编辑器状态
     pub editor_state: EditorState,
+
+    /// 撤销/重做管理器
+    pub command_manager: CommandManager,
 
     /// 相机
     pub camera: Camera,
@@ -142,6 +146,7 @@ impl AlanderApp {
                 show_colliders: false,
                 dragged_entity: None,
             },
+            command_manager: CommandManager::new(50),
             camera,
             camera_transform,
             input: InputState::default(),
@@ -225,21 +230,25 @@ impl AlanderApp {
             }
             WindowEvent::KeyboardInput { input, .. } => {
                 if let Some(key) = input.virtual_keycode {
-                    self.input.keyboard.insert(key, input.state);
-
-                    if key == winit::event::VirtualKeyCode::Escape
-                        && input.state == ElementState::Pressed
-                    {
-                        self.running = false;
-                    }
-
+                    let old_state = self.input.keyboard.insert(key, input.state);
+                    
                     if input.state == ElementState::Pressed {
+                        if old_state.map_or(true, |s| s == ElementState::Released) {
+                            self.input.just_pressed.insert(key);
+                        }
+
+                        if key == winit::event::VirtualKeyCode::Escape {
+                            self.running = false;
+                        }
+
                         match key {
                             winit::event::VirtualKeyCode::W => self.gizmo_manager.mode = GizmoMode::Translate,
                             winit::event::VirtualKeyCode::E => self.gizmo_manager.mode = GizmoMode::Rotate,
                             winit::event::VirtualKeyCode::R => self.gizmo_manager.mode = GizmoMode::Scale,
                             _ => {}
                         }
+                    } else {
+                        self.input.just_released.insert(key);
                     }
                 }
             }
@@ -323,7 +332,7 @@ impl AlanderApp {
             let ray = self.renderer.screen_to_world_ray(glam::Vec2::new(x, y));
             let is_left_pressed = self.input.mouse_button_pressed(MouseButton::Left);
             
-            self.gizmo_manager.update(
+            if let Some(initial_transform) = self.gizmo_manager.update(
                 &ray,
                 glam::Vec2::new(mouse_pos.x, mouse_pos.y),
                 glam::Vec2::new(window_size.width as f32, window_size.height as f32),
@@ -332,13 +341,60 @@ impl AlanderApp {
                 self.editor_state.selected_entity, 
                 &mut scene.world, 
                 self.camera_transform.position
-            );
+            ) {
+                // 拖拽结束，记录命令
+                if let Some(entity) = self.editor_state.selected_entity {
+                    if let Some(new_transform) = scene.world.get::<Transform>(entity) {
+                        let cmd = crate::editor_command::TransformCommand::new(
+                            entity,
+                            initial_transform,
+                            *new_transform,
+                        );
+                        self.command_manager.execute(Box::new(cmd), scene, &mut self.renderer);
+                    }
+                }
+            }
 
             if let Some(entity) = self.editor_state.selected_entity {
                 let gizmo_lines = self.gizmo_manager.render(&scene.world, entity, self.camera_transform.position);
                 self.renderer.update_debug_overlay(&gizmo_lines);
             } else {
                 self.renderer.update_debug_overlay(&[]);
+            }
+
+            // 处理撤销/重做快捷键
+            let is_ctrl = self.input.key_pressed(winit::event::VirtualKeyCode::LControl) || 
+                         self.input.key_pressed(winit::event::VirtualKeyCode::RControl) ||
+                         self.input.key_pressed(winit::event::VirtualKeyCode::LWin) || 
+                         self.input.key_pressed(winit::event::VirtualKeyCode::RWin); // Mac CMD
+
+            if is_ctrl && self.input.key_just_pressed(winit::event::VirtualKeyCode::Z) {
+                if self.input.key_pressed(winit::event::VirtualKeyCode::LShift) || 
+                   self.input.key_pressed(winit::event::VirtualKeyCode::RShift) {
+                    self.command_manager.redo(scene, &mut self.renderer);
+                } else {
+                    self.command_manager.undo(scene, &mut self.renderer);
+                }
+            }
+
+            // 快捷键: 删除 (Delete/Backspace)
+            if self.input.key_just_pressed(winit::event::VirtualKeyCode::Delete) ||
+               self.input.key_just_pressed(winit::event::VirtualKeyCode::Back) {
+                if let Some(entity) = self.editor_state.selected_entity {
+                    tracing::info!("删除实体: {:?}", entity);
+                    let cmd = crate::editor_command::DeleteEntityCommand::new(entity, scene);
+                    self.command_manager.execute(Box::new(cmd), scene, &mut self.renderer);
+                    self.editor_state.selected_entity = None;
+                }
+            }
+
+            // 快捷键: 复制 (Ctrl+D)
+            if is_ctrl && self.input.key_just_pressed(winit::event::VirtualKeyCode::D) {
+                if let Some(entity) = self.editor_state.selected_entity {
+                    tracing::info!("复制实体: {:?}", entity);
+                    let cmd = crate::editor_command::DuplicateEntityCommand::new(entity, scene);
+                    self.command_manager.execute(Box::new(cmd), scene, &mut self.renderer);
+                }
             }
 
             // 2. 将逻辑变更同步到物理世界并执行步进
@@ -359,6 +415,8 @@ impl AlanderApp {
             // 同步光源与渲染对象
             Self::sync_scene_to_renderer_static(&mut self.renderer, scene);
         }
+
+        self.input.clear_frame_state();
 
         self.time.delta = delta_time;
         self.time.elapsed += delta_time;
@@ -486,15 +544,23 @@ impl AlanderApp {
             &mut self.scene_manager,
             &mut self.physics_manager,
             &mut self.gizmo_manager,
+            &mut self.renderer,
+            &mut self.command_manager,
             &mut self.editor_state,
             self.displayed_delta_time
         );
 
         match action {
-            MenuAction::OpenScene => self.on_file_open(),
-            MenuAction::SaveScene => self.on_file_save(),
-            MenuAction::ImportModel => self.on_import_model(),
-            MenuAction::ImportHdr => self.on_import_hdr_environment(),
+            MenuAction::Undo => {
+                if let Some(scene) = self.scene_manager.active_scene_mut() {
+                    self.command_manager.undo(scene, &mut self.renderer);
+                }
+            }
+            MenuAction::Redo => {
+                if let Some(scene) = self.scene_manager.active_scene_mut() {
+                    self.command_manager.redo(scene, &mut self.renderer);
+                }
+            }
             MenuAction::ResetCamera => self.reset_camera(),
             MenuAction::Exit => self.running = false,
             _ => {}
@@ -568,7 +634,7 @@ impl AlanderApp {
     }
 
     fn on_file_save(&mut self) {
-        if let Some(scene) = self.scene_manager.active_scene() {
+        if let Some(scene) = self.scene_manager.active_scene_mut() {
             if let Some(path) = rfd::FileDialog::new().add_filter("Alander 场景", &["json"]).set_file_name("scene.json").save_file() {
                 match scene.to_json() {
                     Ok(json) => {

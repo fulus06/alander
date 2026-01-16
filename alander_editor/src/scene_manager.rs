@@ -2,7 +2,7 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath, EntityUuid, Parent, Children, GlobalTransform};
+use alander_core::scene::{Transform, Mesh, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath, EntityUuid, Parent, Children, GlobalTransform, Camera, Material};
 use serde::{Serialize, Deserialize};
 use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
@@ -55,6 +55,62 @@ impl Scene {
         entity
     }
     
+    /// 复制实体及其所有核心组件
+    pub fn duplicate_entity(&mut self, entity: Entity) -> Option<Entity> {
+        self.duplicate_entity_recursive(entity, None)
+    }
+
+    /// 递归复制实体及其子树
+    fn duplicate_entity_recursive(&mut self, entity: Entity, new_parent: Option<Entity>) -> Option<Entity> {
+        // 1. 获取原实体的核心组件副本
+        let name = self.world.get::<Name>(entity).cloned();
+        let transform = self.world.get::<Transform>(entity).cloned();
+        let mesh = self.world.get::<Mesh>(entity).cloned();
+        let material = self.world.get::<PBRMaterial>(entity).cloned();
+        let light = self.world.get::<PointLight>(entity).cloned();
+        let camera = self.world.get::<Camera>(entity).cloned();
+        let render_id = self.world.get::<RenderId>(entity).cloned();
+        let asset_path = self.world.get::<AssetPath>(entity).cloned();
+        let rigid_body = self.world.get::<RigidBody>(entity).cloned();
+        let collider = self.world.get::<Collider>(entity).cloned();
+
+        // 2. 创建新实体并应用组件
+        let mut builder = self.world.spawn_empty();
+        if let Some(n) = name { builder.insert(Name(format!("{} (Copy)", n.0))); }
+        if let Some(t) = transform { builder.insert(t); }
+        if let Some(m) = mesh { builder.insert(m); }
+        if let Some(mat) = material { builder.insert(mat); }
+        if let Some(l) = light { builder.insert(l); }
+        if let Some(c) = camera { builder.insert(c); }
+        if let Some(rid) = render_id { builder.insert(rid); }
+        if let Some(ap) = asset_path { builder.insert(ap); }
+        if let Some(rb) = rigid_body { builder.insert(rb); }
+        if let Some(col) = collider { builder.insert(col); }
+
+        let new_entity = builder.id();
+
+        // 自动分配新的 UUID
+        self.world.entity_mut(new_entity).insert((
+            EntityUuid(Uuid::new_v4()),
+            GlobalTransform::default(),
+        ));
+
+        // 3. 处理父子关系
+        if let Some(p) = new_parent {
+            self.set_parent(new_entity, Some(p));
+        }
+
+        // 4. 递归处理子节点
+        let children = self.world.get::<Children>(entity).map(|c| c.0.clone());
+        if let Some(child_list) = children {
+            for child in child_list {
+                self.duplicate_entity_recursive(child, Some(new_entity));
+            }
+        }
+
+        Some(new_entity)
+    }
+    
     /// 删除实体 (连带删除子节点)
     pub fn remove_entity(&mut self, entity: Entity) -> bool {
         // 先收集所有子节点
@@ -86,23 +142,19 @@ impl Scene {
     
     /// 设置父子关系，并保持世界坐标不变
     pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) {
-        // 防止自循环或冗余操作
         if Some(child) == parent { return; }
         
         let current_parent = self.world.get::<Parent>(child).map(|p| p.0);
         if current_parent == parent { return; }
 
-        // 0. 计算子节点当前的世界变换 (用于保持位置)
         let child_global = self.world.get::<GlobalTransform>(child)
             .map(|gt| gt.0)
             .unwrap_or_else(|| {
-                // 如果没有 GlobalTransform，则尝试从当前 Transform 计算 (通常应已有)
                 self.world.get::<Transform>(child)
                     .map(|t| t.compute_matrix())
                     .unwrap_or(glam::Mat4::IDENTITY)
             });
 
-        // 1. 先从旧父节点移除
         if let Some(old_parent_comp) = self.world.get::<Parent>(child) {
             let old_parent = old_parent_comp.0;
             if let Some(mut children) = self.world.get_mut::<Children>(old_parent) {
@@ -110,11 +162,8 @@ impl Scene {
             }
         }
 
-        // 2. 更新或删除 Parent 组件
         if let Some(p) = parent {
             self.world.entity_mut(child).insert(Parent(p));
-            
-            // 确保父节点有 Children 组件
             if let Some(mut children) = self.world.get_mut::<Children>(p) {
                 if !children.0.contains(&child) {
                     children.0.push(child);
@@ -123,7 +172,6 @@ impl Scene {
                 self.world.entity_mut(p).insert(Children(vec![child]));
             }
 
-            // 3. 计算相对于新父节点的局部变换
             let parent_global_inv = self.world.get::<GlobalTransform>(p)
                 .map(|gt| gt.0.inverse())
                 .unwrap_or(glam::Mat4::IDENTITY);
@@ -133,8 +181,6 @@ impl Scene {
             self.world.entity_mut(child).insert(new_transform);
         } else {
             self.world.entity_mut(child).remove::<Parent>();
-            
-            // 3. 计算相对于世界的局部变换 (即世界变换本身)
             let new_transform = Transform::from_matrix(child_global);
             self.world.entity_mut(child).insert(new_transform);
         }
@@ -142,7 +188,6 @@ impl Scene {
 
     /// 递归更新层级变换
     pub fn update_hierarchy(&mut self) {
-        // 收集所有根节点 (没有 Parent 的节点)
         let mut roots = Vec::new();
         {
             let mut query = self.world.query_filtered::<Entity, Without<Parent>>();
@@ -150,8 +195,6 @@ impl Scene {
                 roots.push(entity);
             }
         }
-
-        // 递归更新
         for root in roots {
             self.update_node_transform(root, glam::Mat4::IDENTITY);
         }
@@ -163,17 +206,12 @@ impl Scene {
         } else {
             glam::Mat4::IDENTITY
         };
-
         let global_matrix = parent_global * local_matrix;
-        
-        // 更新 GlobalTransform 组件
         if let Some(mut global) = self.world.get_mut::<GlobalTransform>(entity) {
             global.0 = global_matrix;
         } else {
             self.world.entity_mut(entity).insert(GlobalTransform(global_matrix));
         }
-
-        // 递归处理子节点
         let children = self.world.get::<Children>(entity).map(|c| c.0.clone());
         if let Some(child_list) = children {
             for child in child_list {
@@ -182,18 +220,11 @@ impl Scene {
         }
     }
 
-    /// 获取实体数量
-    pub fn entity_count(&self) -> usize {
-        self.world.entities().len() as usize
-    }
-    
-    /// 加载网格资源并添加到渲染器
     pub fn load_mesh(&mut self, renderer: &mut Renderer, source: &str) -> Result<(alander_core::assets::Handle<alander_core::scene::MeshData>, RenderId, BoundingBox, AssetPath), String> {
         let mut loader = SimpleMeshLoader;
         match loader.load(source) {
             Ok(mesh_data) => {
                 let handle = self.mesh_manager.load(mesh_data.clone());
-                
                 let mesh_data_clone = mesh_data.clone();
                 let render_vertices: Vec<Vertex> = mesh_data_clone.vertices.iter().map(|v| {
                     Vertex {
@@ -203,7 +234,6 @@ impl Scene {
                         tangent: v.tangent.to_array(),
                     }
                 }).collect();
-
                 let scene_object = SceneObject::new(
                     renderer.device(),
                     &render_vertices,
@@ -218,59 +248,35 @@ impl Scene {
                     MaterialBuffer::default(),
                     &renderer.resources.samplers.linear_clamp,
                 );
-                
                 let render_uuid = uuid::Uuid::new_v4();
                 renderer.add_object(render_uuid, scene_object);
-                
                 let bbox = BoundingBox {
                     local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
                     world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
                 };
-                
-                let asset_path = AssetPath {
-                    path: source.to_string(),
-                    sub_asset: None,
-                };
-                
+                let asset_path = AssetPath { path: source.to_string(), sub_asset: None };
                 Ok((handle, RenderId(render_uuid), bbox, asset_path))
             },
             Err(e) => Err(format!("网格加载失败: {}", e)),
         }
     }
     
-    /// 加载材质资源
-    pub fn load_material(&mut self, source: &str) -> Result<alander_core::assets::Handle<alander_core::scene::MaterialData>, String> {
-        let mut loader = SimpleMaterialLoader;
-        match loader.load(source) {
-            Ok(material_data) => Ok(self.material_manager.load(material_data)),
-            Err(e) => Err(format!("材质加载失败: {}", e)),
-        }
-    }
-    
-    /// 获取所有实体及其名称
     pub fn get_entities_with_names(&self) -> Vec<(Entity, String)> {
         let mut entities = Vec::new();
-        
         for entity in self.world.iter_entities() {
             let entity_id = entity.id();
-            let parent = self.world.get::<Parent>(entity_id);
-            let name = self.world.get::<Name>(entity_id).map(|n| n.0.clone()).unwrap_or_else(|| format!("未命名实体 {:?}", entity_id));
-            
-            // 如果有父节点，在此不列出（由 UI 递归列出）
-            if parent.is_none() {
+            if self.world.get::<Parent>(entity_id).is_none() {
+                let name = self.world.get::<Name>(entity_id).map(|n| n.0.clone()).unwrap_or_else(|| format!("未命名实体 {:?}", entity_id));
                 entities.push((entity_id, name));
             }
         }
-        
         entities
     }
     
-    /// 获取实体的变换组件
     pub fn get_entity_transform(&self, entity: Entity) -> Option<Transform> {
         self.world.get::<Transform>(entity).cloned()
     }
     
-    /// 更新实体的变换组件
     pub fn update_entity_transform(&mut self, entity: Entity, transform: Transform) -> bool {
         if let Some(mut entity_mut) = self.world.get_entity_mut(entity) {
             entity_mut.insert(transform);
@@ -280,189 +286,129 @@ impl Scene {
         }
     }
 
-    /// 将场景保存为 JSON 字符串
-    pub fn to_json(&self) -> Result<String, String> {
+    pub fn serialize_entity_subtree(&self, entity: Entity) -> Vec<EntityData> {
         let mut entities_data = Vec::new();
-
-        for entity in self.world.iter_entities() {
-            let entity_id = entity.id();
-            
-            let name = self.world.get::<Name>(entity_id).cloned();
-            let uuid = self.world.get::<EntityUuid>(entity_id).cloned();
-            let transform = self.world.get::<Transform>(entity_id).cloned();
-            let pbr_material = self.world.get::<PBRMaterial>(entity_id).cloned();
-            let point_light = self.world.get::<PointLight>(entity_id).cloned();
-            let rigid_body = self.world.get::<RigidBody>(entity_id).cloned();
-            let collider = self.world.get::<Collider>(entity_id).cloned();
-            let asset_path = self.world.get::<AssetPath>(entity_id).cloned();
-            
-            let parent_uuid = if let Some(parent_comp) = self.world.get::<Parent>(entity_id) {
-                self.world.get::<EntityUuid>(parent_comp.0).map(|id| id.0)
-            } else {
-                None
-            };
-
-            entities_data.push(EntityData {
-                name,
-                uuid,
-                transform,
-                pbr_material,
-                point_light,
-                rigid_body,
-                collider,
-                asset_path,
-                parent_uuid,
-            });
+        let mut to_process = vec![entity];
+        let mut idx = 0;
+        while idx < to_process.len() {
+            let curr = to_process[idx];
+            idx += 1;
+            if let Some(uuid_comp) = self.world.get::<EntityUuid>(curr) {
+                let uuid = uuid_comp.0;
+                let name = self.world.get::<Name>(curr).map(|n| n.0.clone()).unwrap_or_default();
+                let transform = self.world.get::<Transform>(curr).cloned();
+                let pbr_material = self.world.get::<PBRMaterial>(curr).cloned();
+                let point_light = self.world.get::<PointLight>(curr).cloned();
+                let rigid_body = self.world.get::<RigidBody>(curr).cloned();
+                let collider = self.world.get::<Collider>(curr).cloned();
+                let asset_path = self.world.get::<AssetPath>(curr).cloned();
+                let parent_uuid = if let Some(parent_comp) = self.world.get::<Parent>(curr) {
+                    self.world.get::<EntityUuid>(parent_comp.0).map(|id| id.0)
+                } else {
+                    None
+                };
+                entities_data.push(EntityData { name, uuid, transform, pbr_material, point_light, rigid_body, collider, asset_path, parent_uuid });
+                if let Some(children) = self.world.get::<Children>(curr) {
+                    for &child in &children.0 { to_process.push(child); }
+                }
+            }
         }
-
-        let scene_data = SceneData {
-            name: self.name.clone(),
-            entities: entities_data,
-        };
-
-        serde_json::to_string_pretty(&scene_data).map_err(|e| e.to_string())
+        entities_data
     }
 
-    /// 从 JSON 字符串加载场景
-    pub fn from_json(json: &str, renderer: &mut Renderer) -> Result<Self, String> {
-        let scene_data: SceneData = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        let mut scene = Scene::new(&scene_data.name);
-
-        // 使用本地缓存避免重复加载同一个 glTF，以及已加载到渲染器的纹理映射
+    pub fn spawn_entity_subtree(&mut self, entities_data: Vec<EntityData>, renderer: &mut Renderer) -> Vec<Entity> {
+        let mut uuid_to_entity = HashMap::new();
+        let mut created_entities = Vec::new();
         let mut gltf_cache: HashMap<String, (alander_core::assets::GltfModel, HashMap<usize, usize>)> = HashMap::new();
 
-        for entity_data in &scene_data.entities {
-            let mut asset_info = None;
-            
-            if let Some(ref asset_path) = entity_data.asset_path {
+        for data in &entities_data {
+            let mut builder = self.world.spawn_empty();
+            builder.insert((Name(data.name.clone()), EntityUuid(data.uuid), GlobalTransform::default()));
+            if let Some(ref t) = data.transform { builder.insert(*t); }
+            if let Some(ref rb) = data.rigid_body { builder.insert(rb.clone()); }
+            if let Some(ref col) = data.collider { builder.insert(col.clone()); }
+            if let Some(ref light) = data.point_light { builder.insert(light.clone()); }
+            if let Some(ref mat) = data.pbr_material { builder.insert(mat.clone()); }
+            if let Some(ref asset_path) = data.asset_path {
+                builder.insert(asset_path.clone());
                 if asset_path.path.ends_with(".glb") || asset_path.path.ends_with(".gltf") {
-                    // 处理 glTF 资产
                     if !gltf_cache.contains_key(&asset_path.path) {
                         let loader = alander_core::assets::GltfLoader;
-                        match loader.load_scene(&asset_path.path) {
-                            Ok(m) => {
-                                let t_map = renderer.load_gltf_textures(&m);
-                                gltf_cache.insert(asset_path.path.clone(), (m, t_map));
-                            }
-                            Err(e) => {
-                                tracing::error!("查找 glTF 失败 {}: {}", asset_path.path, e);
-                                continue;
-                            }
+                        if let Ok(m) = loader.load_scene(&asset_path.path) {
+                            let t_map = renderer.load_gltf_textures(&m);
+                            gltf_cache.insert(asset_path.path.clone(), (m, t_map));
                         }
                     }
-
                     if let Some((model, texture_map)) = gltf_cache.get(&asset_path.path) {
-                        // 寻找匹配的 Mesh
                         let sub_name = asset_path.sub_asset.as_deref().unwrap_or("");
                         if let Some(gltf_mesh) = model.meshes.iter().find(|m| m.data.name == sub_name || sub_name.is_empty()) {
-                            // 获取对应的纹理
                             let diffuse_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, texture_map, 0);
                             let normal_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, texture_map, 1);
                             let mr_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, texture_map, 2);
-
-                            // 构造材质标志
                             let mut material_buffer = MaterialBuffer::default();
-                            if normal_texture as *const _ != renderer.default_texture() as *const _ {
-                                material_buffer.has_normal_texture = 1;
-                            }
-                            if mr_texture as *const _ != renderer.default_texture() as *const _ {
-                                material_buffer.has_metallic_roughness_texture = 1;
-                            }
-
-                            // 将此网格数据转换并添加到渲染器
+                            if normal_texture as *const _ != renderer.default_texture() as *const _ { material_buffer.has_normal_texture = 1; }
+                            if mr_texture as *const _ != renderer.default_texture() as *const _ { material_buffer.has_metallic_roughness_texture = 1; }
                             let render_vertices: Vec<Vertex> = gltf_mesh.data.vertices.iter().map(|v| {
-                                Vertex {
-                                    position: v.position.to_array(),
-                                    normal: v.normal.to_array(),
-                                    uv: v.uv.to_array(),
-                                    tangent: v.tangent.to_array(),
-                                }
+                                Vertex { position: v.position.to_array(), normal: v.normal.to_array(), uv: v.uv.to_array(), tangent: v.tangent.to_array() }
                             }).collect();
-
                             let scene_object = SceneObject::new(
-                                renderer.device(),
-                                &render_vertices,
-                                &gltf_mesh.data.indices,
-                                &renderer.pipelines().mesh.model_bind_group_layout,
-                                &renderer.pipelines().mesh.texture_bind_group_layout,
+                                renderer.device(), &render_vertices, &gltf_mesh.data.indices,
+                                &renderer.pipelines().mesh.model_bind_group_layout, &renderer.pipelines().mesh.texture_bind_group_layout,
                                 &renderer.pipelines().mesh.material_bind_group_layout,
-                                diffuse_texture,
-                                normal_texture,
-                                mr_texture,
-                                glam::Mat4::IDENTITY,
-                                material_buffer,
-                                &renderer.resources.samplers.linear_clamp,
+                                diffuse_texture, normal_texture, mr_texture, glam::Mat4::IDENTITY, material_buffer, &renderer.resources.samplers.linear_clamp,
                             );
-                            let render_uuid = uuid::Uuid::new_v4();
+                            let render_uuid = Uuid::new_v4();
                             renderer.add_object(render_uuid, scene_object);
-
-                            let handle = scene.mesh_manager.load(gltf_mesh.data.clone());
-                            let bbox = BoundingBox {
-                                local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
-                                world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
-                            };
-                            asset_info = Some((handle, RenderId(render_uuid), bbox, asset_path.clone()));
+                            builder.insert(RenderId(render_uuid));
                         }
                     }
-                } else {
-                    // 处理普通资产（如 "cube"）
-                    match scene.load_mesh(renderer, &asset_path.path) {
-                        Ok(info) => asset_info = Some(info),
-                        Err(e) => tracing::error!("场景加载时无法重载网格 {}: {}", asset_path.path, e),
-                    }
                 }
             }
-
-            // 2. 创建实体并插入组件
-            let mut entity_builder = scene.world.spawn_empty();
-            
-            if let Some(ref name) = entity_data.name { entity_builder.insert(name.clone()); }
-            if let Some(ref uuid) = entity_data.uuid { entity_builder.insert(*uuid); }
-            if let Some(ref transform) = entity_data.transform { entity_builder.insert(*transform); }
-            if let Some(ref pbr_material) = entity_data.pbr_material { entity_builder.insert(pbr_material.clone()); }
-            if let Some(ref point_light) = entity_data.point_light { entity_builder.insert(*point_light); }
-            if let Some(ref rigid_body) = entity_data.rigid_body { entity_builder.insert(rigid_body.clone()); }
-            if let Some(ref collider) = entity_data.collider { entity_builder.insert(collider.clone()); }
-
-            if let Some((handle, render_id, bbox, path)) = asset_info {
-                entity_builder.insert(Mesh { handle });
-                entity_builder.insert(render_id);
-                entity_builder.insert(bbox);
-                entity_builder.insert(path);
-            }
+            let entity = builder.id();
+            uuid_to_entity.insert(data.uuid, entity);
+            created_entities.push(entity);
         }
-
-        // 第三步：重建父子关系
-        let mut uuid_to_entity = HashMap::new();
-        for (entity, uuid) in scene.world.query::<(Entity, &EntityUuid)>().iter(&scene.world) {
-            uuid_to_entity.insert(uuid.0, entity);
-        }
-
-        // 我们需要重新遍历 EntityData 来设置父级
-        for entity_data in scene_data.entities.iter() {
-            if let (Some(parent_uuid), Some(uuid_comp)) = (entity_data.parent_uuid, &entity_data.uuid) {
-                if let (Some(&parent_entity), Some(&child_entity)) = (uuid_to_entity.get(&parent_uuid), uuid_to_entity.get(&uuid_comp.0)) {
-                    scene.set_parent(child_entity, Some(parent_entity));
+        for data in &entities_data {
+            if let (Some(&child), Some(parent_uuid)) = (uuid_to_entity.get(&data.uuid), data.parent_uuid) {
+                if let Some(&parent) = uuid_to_entity.get(&parent_uuid) {
+                    self.set_parent(child, Some(parent));
                 }
             }
         }
+        created_entities
+    }
 
+    pub fn to_json(&mut self) -> Result<String, String> {
+        let mut entities_data = Vec::new();
+        let mut query = self.world.query_filtered::<Entity, Without<Parent>>();
+        for entity in query.iter(&self.world) {
+            entities_data.extend(self.serialize_entity_subtree(entity));
+        }
+        let scene_data = SceneData { name: self.name.clone(), entities: entities_data };
+        serde_json::to_string_pretty(&scene_data).map_err(|e| e.to_string())
+    }
+
+    pub fn from_json(json: &str, renderer: &mut Renderer) -> Result<Self, String> {
+        let scene_data: SceneData = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let mut scene = Scene::new(&scene_data.name);
+        scene.spawn_entity_subtree(scene_data.entities, renderer);
+        scene.update_hierarchy();
         Ok(scene)
     }
+
+    pub fn entity_count(&self) -> usize { self.world.entities().len() as usize }
 }
 
-/// 场景序列化结构
 #[derive(Serialize, Deserialize)]
 pub struct SceneData {
     pub name: String,
     pub entities: Vec<EntityData>,
 }
 
-/// 实体序列化结构
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct EntityData {
-    pub name: Option<Name>,
-    pub uuid: Option<EntityUuid>,
+    pub name: String,
+    pub uuid: Uuid,
     pub transform: Option<Transform>,
     pub pbr_material: Option<PBRMaterial>,
     pub point_light: Option<PointLight>,
@@ -472,7 +418,6 @@ pub struct EntityData {
     pub parent_uuid: Option<Uuid>,
 }
 
-/// 场景管理器
 pub struct SceneManager {
     scenes: HashMap<SceneHandle, Scene>,
     active_scene: Option<SceneHandle>,
@@ -480,203 +425,57 @@ pub struct SceneManager {
 
 impl SceneManager {
     pub fn new() -> Self {
-        Self {
-            scenes: HashMap::new(),
-            active_scene: None,
-        }
-    }
-    
-    /// 创建新场景
-    pub fn create_scene(&mut self, name: &str) -> SceneHandle {
-        let scene = Scene::new(name);
-        let handle = scene.handle;
-        self.scenes.insert(handle, scene);
-        
-        // 如果没有激活场景，设置此场景为激活场景
-        if self.active_scene.is_none() {
-            self.active_scene = Some(handle);
-        }
-        
-        handle
-    }
-    
-    /// 获取激活场景
-    pub fn active_scene(&self) -> Option<&Scene> {
-        self.active_scene.and_then(|handle| self.scenes.get(&handle))
-    }
-    
-    /// 获取激活场景的可变引用
-    pub fn active_scene_mut(&mut self) -> Option<&mut Scene> {
-        self.active_scene.and_then(|handle| self.scenes.get_mut(&handle))
-    }
-    
-    /// 设置激活场景
-    pub fn set_active_scene(&mut self, handle: SceneHandle) -> bool {
-        if self.scenes.contains_key(&handle) {
-            self.active_scene = Some(handle);
-            true
-        } else {
-            false
-        }
-    }
-    
-    /// 获取所有场景
-    pub fn get_scenes(&self) -> Vec<(&SceneHandle, &str)> {
-        self.scenes.iter()
-            .map(|(handle, scene)| (handle, scene.name.as_str()))
-            .collect()
-    }
-    
-    /// 删除场景
-    pub fn remove_scene(&mut self, handle: SceneHandle) -> bool {
-        if Some(handle) == self.active_scene {
-            self.active_scene = None;
-        }
-        self.scenes.remove(&handle).is_some()
+        Self { scenes: HashMap::new(), active_scene: None }
     }
 
-    /// 从现有场景对象创建（加载）场景
+    pub fn add_scene(&mut self, scene: Scene) -> SceneHandle {
+        let handle = scene.handle;
+        self.scenes.insert(handle, scene);
+        if self.active_scene.is_none() { self.active_scene = Some(handle); }
+        handle
+    }
+
+    pub fn create_scene(&mut self, name: &str) -> SceneHandle {
+        self.add_scene(Scene::new(name))
+    }
+
     pub fn create_scene_from_object(&mut self, scene: Scene) -> SceneHandle {
         let handle = scene.handle;
         self.scenes.insert(handle, scene);
         self.active_scene = Some(handle);
         handle
     }
-    
-    /// 创建测试场景
+
+    pub fn active_scene(&self) -> Option<&Scene> { self.active_scene.and_then(|h| self.scenes.get(&h)) }
+    pub fn active_scene_mut(&mut self) -> Option<&mut Scene> { self.active_scene.and_then(|h| self.scenes.get_mut(&h)) }
+    pub fn set_active_scene(&mut self, handle: SceneHandle) -> bool {
+        if self.scenes.contains_key(&handle) { self.active_scene = Some(handle); true } else { false }
+    }
+    pub fn get_scenes(&self) -> Vec<(&SceneHandle, &str)> { self.scenes.iter().map(|(h, s)| (h, s.name.as_str())).collect() }
+    pub fn remove_scene(&mut self, handle: SceneHandle) -> bool {
+        if Some(handle) == self.active_scene { self.active_scene = None; }
+        self.scenes.remove(&handle).is_some()
+    }
+
     pub fn create_test_scene(&mut self, renderer: &mut Renderer) -> SceneHandle {
         let handle = self.create_scene("测试场景");
-        
         if let Some(scene) = self.active_scene_mut() {
-            // 创建地面实体
             let ground_object = create_cube(
-                renderer.device(),
-                &renderer.pipelines().mesh.model_bind_group_layout,
-                &renderer.pipelines().mesh.texture_bind_group_layout,
-                &renderer.pipelines().mesh.material_bind_group_layout,
-                renderer.default_texture(),
-                &renderer.resources.samplers.linear_clamp,
+                renderer.device(), &renderer.pipelines().mesh.model_bind_group_layout, &renderer.pipelines().mesh.texture_bind_group_layout,
+                &renderer.pipelines().mesh.material_bind_group_layout, renderer.default_texture(), &renderer.resources.samplers.linear_clamp,
             );
             let ground_uuid = uuid::Uuid::new_v4();
             renderer.add_object(ground_uuid, ground_object);
-
             scene.create_entity((
                 Name("地面".to_string()),
-                Transform {
-                    position: glam::Vec3::new(0.0, -1.0, 0.0),
-                    rotation: glam::Quat::IDENTITY,
-                    scale: glam::Vec3::new(10.0, 0.1, 10.0), // 扁平的地面
-                },
+                Transform { position: glam::Vec3::new(0.0, -1.0, 0.0), rotation: glam::Quat::IDENTITY, scale: glam::Vec3::new(10.0, 0.1, 10.0) },
                 RenderId(ground_uuid),
-                BoundingBox {
-                    local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
-                    world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)),
-                },
-                PBRMaterial {
-                    base_color: glam::Vec4::new(0.5, 0.5, 0.5, 1.0),
-                    metallic: 0.1,
-                    roughness: 0.8,
-                    emissive: glam::Vec3::ZERO,
-                },
+                BoundingBox { local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)), world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)) },
+                PBRMaterial { base_color: glam::Vec4::new(0.5, 0.5, 0.5, 1.0), metallic: 0.1, roughness: 0.8, emissive: glam::Vec3::ZERO },
                 RigidBody::new(RigidBodyType::Static),
                 Collider::cuboid(5.0, 0.05, 5.0),
             ));
-            
-            // 创建主要立方体实体
-            if let Ok((mesh_handle, render_id, bbox, asset_path)) = scene.load_mesh(renderer, "cube") {
-                scene.create_entity((
-                    Name("主立方体".to_string()),
-                    Transform::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
-                    Mesh { handle: mesh_handle },
-                    render_id,
-                    bbox,
-                    asset_path,
-                    PBRMaterial {
-                        base_color: glam::Vec4::new(1.0, 0.3, 0.3, 1.0), // 红色材质
-                        metallic: 0.8,
-                        roughness: 0.2,
-                        emissive: glam::Vec3::ZERO,
-                    },
-                    RigidBody::new(RigidBodyType::Dynamic),
-                    Collider::cuboid(0.5, 0.5, 0.5),
-                ));
-            }
-
-            // 创建光源实体
-            scene.create_entity((
-                Name("主光源".to_string()),
-                Transform::from_translation(glam::Vec3::new(4.0, 5.0, 4.0)),
-                PointLight {
-                    color: glam::Vec3::new(1.0, 1.0, 1.0),
-                    intensity: 50.0,
-                    range: 20.0,
-                },
-            ));
-            
-            // 创建更多测试实体
-            for i in 0..3 {
-                if let Ok((mesh_handle, render_id, bbox, asset_path)) = scene.load_mesh(renderer, "cube") {
-                    scene.create_entity((
-                        Name(format!("测试实体{}", i)),
-                        Transform::from_translation(glam::Vec3::new((i as f32) * 2.0 + 3.0, 0.5, 0.0)),
-                        Mesh { handle: mesh_handle },
-                        render_id,
-                        bbox,
-                        asset_path,
-                        PBRMaterial::default(),
-                    ));
-                }
-            }
         }
-        
         handle
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_scene_creation() {
-        let mut manager = SceneManager::new();
-        let handle = manager.create_scene("测试场景");
-        
-        assert!(manager.active_scene().is_some());
-        assert_eq!(manager.active_scene().unwrap().name, "测试场景");
-        
-        let scene = manager.active_scene().unwrap();
-        assert_eq!(scene.entity_count(), 0);
-    }
-    
-    #[test]
-    fn test_entity_creation() {
-        let mut manager = SceneManager::new();
-        manager.create_scene("测试场景");
-        
-        if let Some(scene) = manager.active_scene_mut() {
-            let entity = scene.create_entity((
-                Name("测试实体".to_string()),
-                Transform::default(),
-            ));
-            
-            assert_eq!(scene.entity_count(), 1);
-            
-            let name = scene.world.get::<Name>(entity).unwrap();
-            assert_eq!(name.0, "测试实体");
-        }
-    }
-    
-    #[test]
-    fn test_test_scene() {
-        let mut manager = SceneManager::new();
-        manager.create_test_scene();
-        
-        let scene = manager.active_scene().unwrap();
-        assert!(scene.entity_count() >= 4); // 地面 + 立方体 + 3个测试实体
-        
-        let entities = scene.get_entities_with_names();
-        assert!(entities.iter().any(|(_, name)| name == "立方体"));
-        assert!(entities.iter().any(|(_, name)| name == "地面"));
     }
 }
