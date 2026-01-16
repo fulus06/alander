@@ -50,7 +50,7 @@ rapier3d = { workspace = true }
 serde = { workspace = true }
 serde_json = "1.0"
 sysinfo = "0.29"
-rhai = { version = "1.16", features = ["sync", "serde"] }
+rhai = { version = "1.16", features = ["sync", "serde", "f32_float"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { workspace = true }
