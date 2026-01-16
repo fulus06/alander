@@ -106,9 +106,31 @@ pub mod assets;
 pub mod scene {
     use super::*;
 
-    /// 场景实体组件
+    /// 场景实体名称组件
     #[derive(Component, Debug, Clone, Serialize, Deserialize)]
     pub struct Name(pub String);
+
+    /// 实体唯一标识符，用于持久化和层级引用
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+    pub struct EntityUuid(pub uuid::Uuid);
+
+    /// 父节点组件
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct Parent(pub Entity);
+
+    /// 子节点集合组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct Children(pub Vec<Entity>);
+
+    /// 全局变换组件 (世界空间变换矩阵)
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct GlobalTransform(pub Mat4);
+
+    impl Default for GlobalTransform {
+        fn default() -> Self {
+            Self(Mat4::IDENTITY)
+        }
+    }
 
     /// 变换组件
     #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]

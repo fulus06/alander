@@ -4,7 +4,7 @@ use winit::event::{WindowEvent, ElementState, MouseButton};
 use tracing::info;
 use std::sync::Arc;
 use alander_core::{
-    scene::{Camera, Transform, PointLight, Name, RenderId, AssetPath, BoundingBox, PBRMaterial},
+    scene::{Camera, Transform, PointLight, Name, RenderId, AssetPath, BoundingBox, PBRMaterial, GlobalTransform},
     InputState, RenderState, Time,
 };
 use alander_render::renderer::Renderer;
@@ -339,6 +339,9 @@ impl AlanderApp {
                 self.renderer.update_debug_overlay(&[]);
             }
 
+            // 1.5 场景层级更新 (计算 GlobalTransform)
+            scene.update_hierarchy();
+
             // 2. 将逻辑变更同步到物理世界并执行步进
             // 这样确保下一帧的拾取 (在 WindowsEvent 中) 使用的是最新的物理世界
             self.physics_manager.integration_parameters.dt = delta_time;
@@ -372,10 +375,12 @@ impl AlanderApp {
     fn sync_scene_to_renderer_static(renderer: &mut Renderer, scene: &mut Scene) {
         // 1. 同步光源
         let mut light_buffer = alander_render::pipelines::LightBuffer::new();
-        let mut light_query = scene.world.query::<(&Transform, &PointLight)>();
-        for (transform, light) in light_query.iter(&scene.world) {
+        let mut light_query = scene.world.query::<(&GlobalTransform, &PointLight)>();
+        for (global_transform, light) in light_query.iter(&scene.world) {
+            // 从全局变换矩阵提取位置
+            let pos = global_transform.0.transform_point3(glam::Vec3::ZERO);
             let render_light = alander_render::pipelines::Light::new(
-                transform.position.into(),
+                pos.into(),
                 light.color.into(),
                 light.intensity,
                 light.range,
@@ -386,14 +391,14 @@ impl AlanderApp {
 
         // 2. 同步渲染对象
         let mut query = scene.world.query::<(
-            &Transform, 
+            &GlobalTransform, 
             &RenderId, 
             Option<&mut BoundingBox>,
             Option<&PBRMaterial>
         )>();
         
-        for (transform, render_id, mut bbox, material) in query.iter_mut(&mut scene.world) {
-            let matrix = transform.compute_matrix();
+        for (global_transform, render_id, mut bbox, material) in query.iter_mut(&mut scene.world) {
+            let matrix = global_transform.0;
             let m = matrix.to_cols_array_2d();
             let cg_matrix = cgmath::Matrix4::new(
                 m[0][0], m[0][1], m[0][2], m[0][3],
@@ -402,7 +407,7 @@ impl AlanderApp {
                 m[3][0], m[3][1], m[3][2], m[3][3],
             );
 
-            let render_mat = material.map(|m| alander_render::pipelines::MaterialBuffer {
+            let render_mat = material.map(|m: &PBRMaterial| alander_render::pipelines::MaterialBuffer {
                 base_color: m.base_color.into(),
                 metallic: m.metallic,
                 roughness: m.roughness,

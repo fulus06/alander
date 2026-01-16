@@ -2,7 +2,7 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath};
+use alander_core::scene::{Transform, Mesh, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath, EntityUuid, Parent, Children, GlobalTransform};
 use serde::{Serialize, Deserialize};
 use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
@@ -46,14 +46,113 @@ impl Scene {
     
     /// 创建新实体
     pub fn create_entity(&mut self, components: impl Bundle) -> Entity {
-        self.world.spawn(components).id()
+        let entity = self.world.spawn(components).id();
+        // 自动分配 UUID 和初始全局变换
+        self.world.entity_mut(entity).insert((
+            EntityUuid(Uuid::new_v4()),
+            GlobalTransform::default(),
+        ));
+        entity
     }
     
-    /// 删除实体
+    /// 删除实体 (连带删除子节点)
     pub fn remove_entity(&mut self, entity: Entity) -> bool {
-        self.world.despawn(entity)
+        // 先收集所有子节点
+        let mut to_remove = vec![entity];
+        let mut idx = 0;
+        while idx < to_remove.len() {
+            let curr = to_remove[idx];
+            if let Some(children) = self.world.get::<Children>(curr) {
+                for &child in &children.0 {
+                    to_remove.push(child);
+                }
+            }
+            idx += 1;
+        }
+
+        // 从父节点中移除
+        if let Some(parent_comp) = self.world.get::<Parent>(entity) {
+            let parent = parent_comp.0;
+            if let Some(mut children) = self.world.get_mut::<Children>(parent) {
+                children.0.retain(|&c| c != entity);
+            }
+        }
+
+        for e in to_remove {
+            self.world.despawn(e);
+        }
+        true
     }
     
+    /// 设置父子关系
+    pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) {
+        // 1. 先从旧父节点移除
+        if let Some(old_parent_comp) = self.world.get::<Parent>(child) {
+            let old_parent = old_parent_comp.0;
+            if let Some(mut children) = self.world.get_mut::<Children>(old_parent) {
+                children.0.retain(|&c| c != child);
+            }
+        }
+
+        // 2. 更新或删除 Parent 组件
+        if let Some(p) = parent {
+            self.world.entity_mut(child).insert(Parent(p));
+            
+            // 确保父节点有 Children 组件
+            if let Some(mut children) = self.world.get_mut::<Children>(p) {
+                if !children.0.contains(&child) {
+                    children.0.push(child);
+                }
+            } else {
+                self.world.entity_mut(p).insert(Children(vec![child]));
+            }
+        } else {
+            self.world.entity_mut(child).remove::<Parent>();
+        }
+    }
+
+    /// 递归更新层级变换
+    pub fn update_hierarchy(&mut self) {
+        // 收集所有根节点 (没有 Parent 的节点)
+        let mut roots = Vec::new();
+        {
+            let mut query = self.world.query_filtered::<Entity, Without<Parent>>();
+            for entity in query.iter(&self.world) {
+                roots.push(entity);
+            }
+        }
+
+        // 递归更新
+        for root in roots {
+            self.update_node_transform(root, glam::Mat4::IDENTITY);
+        }
+    }
+
+    fn update_node_transform(&mut self, entity: Entity, parent_global: glam::Mat4) {
+        let local_matrix = if let Some(transform) = self.world.get::<Transform>(entity) {
+            transform.compute_matrix()
+        } else {
+            glam::Mat4::IDENTITY
+        };
+
+        let global_matrix = parent_global * local_matrix;
+        
+        // 更新 GlobalTransform 组件
+        if let Some(mut global) = self.world.get_mut::<GlobalTransform>(entity) {
+            global.0 = global_matrix;
+        } else {
+            self.world.entity_mut(entity).insert(GlobalTransform(global_matrix));
+        }
+
+        // 递归处理子节点
+        let children = self.world.get::<Children>(entity).map(|c| c.0.clone());
+        if let Some(child_list) = children {
+            for child in child_list {
+                self.update_node_transform(child, global_matrix);
+            }
+        }
+    }
+
     /// 获取实体数量
     pub fn entity_count(&self) -> usize {
         self.world.entities().len() as usize
@@ -125,10 +224,12 @@ impl Scene {
         
         for entity in self.world.iter_entities() {
             let entity_id = entity.id();
-            if let Some(name) = self.world.get::<Name>(entity_id) {
-                entities.push((entity_id, name.0.clone()));
-            } else {
-                entities.push((entity_id, format!("未命名实体 {:?}", entity_id)));
+            let parent = self.world.get::<Parent>(entity_id);
+            let name = self.world.get::<Name>(entity_id).map(|n| n.0.clone()).unwrap_or_else(|| format!("未命名实体 {:?}", entity_id));
+            
+            // 如果有父节点，在此不列出（由 UI 递归列出）
+            if parent.is_none() {
+                entities.push((entity_id, name));
             }
         }
         
@@ -158,21 +259,30 @@ impl Scene {
             let entity_id = entity.id();
             
             let name = self.world.get::<Name>(entity_id).cloned();
+            let uuid = self.world.get::<EntityUuid>(entity_id).cloned();
             let transform = self.world.get::<Transform>(entity_id).cloned();
             let pbr_material = self.world.get::<PBRMaterial>(entity_id).cloned();
             let point_light = self.world.get::<PointLight>(entity_id).cloned();
             let rigid_body = self.world.get::<RigidBody>(entity_id).cloned();
             let collider = self.world.get::<Collider>(entity_id).cloned();
             let asset_path = self.world.get::<AssetPath>(entity_id).cloned();
+            
+            let parent_uuid = if let Some(parent_comp) = self.world.get::<Parent>(entity_id) {
+                self.world.get::<EntityUuid>(parent_comp.0).map(|id| id.0)
+            } else {
+                None
+            };
 
             entities_data.push(EntityData {
                 name,
+                uuid,
                 transform,
                 pbr_material,
                 point_light,
                 rigid_body,
                 collider,
                 asset_path,
+                parent_uuid,
             });
         }
 
@@ -192,7 +302,7 @@ impl Scene {
         // 使用本地缓存避免重复加载同一个 glTF，以及已加载到渲染器的纹理映射
         let mut gltf_cache: HashMap<String, (alander_core::assets::GltfModel, HashMap<usize, usize>)> = HashMap::new();
 
-        for entity_data in scene_data.entities {
+        for entity_data in &scene_data.entities {
             let mut asset_info = None;
             
             if let Some(ref asset_path) = entity_data.asset_path {
@@ -277,18 +387,34 @@ impl Scene {
             // 2. 创建实体并插入组件
             let mut entity_builder = scene.world.spawn_empty();
             
-            if let Some(name) = entity_data.name { entity_builder.insert(name); }
-            if let Some(transform) = entity_data.transform { entity_builder.insert(transform); }
-            if let Some(pbr_material) = entity_data.pbr_material { entity_builder.insert(pbr_material); }
-            if let Some(point_light) = entity_data.point_light { entity_builder.insert(point_light); }
-            if let Some(rigid_body) = entity_data.rigid_body { entity_builder.insert(rigid_body); }
-            if let Some(collider) = entity_data.collider { entity_builder.insert(collider); }
+            if let Some(ref name) = entity_data.name { entity_builder.insert(name.clone()); }
+            if let Some(ref uuid) = entity_data.uuid { entity_builder.insert(*uuid); }
+            if let Some(ref transform) = entity_data.transform { entity_builder.insert(*transform); }
+            if let Some(ref pbr_material) = entity_data.pbr_material { entity_builder.insert(pbr_material.clone()); }
+            if let Some(ref point_light) = entity_data.point_light { entity_builder.insert(*point_light); }
+            if let Some(ref rigid_body) = entity_data.rigid_body { entity_builder.insert(rigid_body.clone()); }
+            if let Some(ref collider) = entity_data.collider { entity_builder.insert(collider.clone()); }
 
             if let Some((handle, render_id, bbox, path)) = asset_info {
                 entity_builder.insert(Mesh { handle });
                 entity_builder.insert(render_id);
                 entity_builder.insert(bbox);
                 entity_builder.insert(path);
+            }
+        }
+
+        // 第三步：重建父子关系
+        let mut uuid_to_entity = HashMap::new();
+        for (entity, uuid) in scene.world.query::<(Entity, &EntityUuid)>().iter(&scene.world) {
+            uuid_to_entity.insert(uuid.0, entity);
+        }
+
+        // 我们需要重新遍历 EntityData 来设置父级
+        for entity_data in scene_data.entities.iter() {
+            if let (Some(parent_uuid), Some(uuid_comp)) = (entity_data.parent_uuid, &entity_data.uuid) {
+                if let (Some(&parent_entity), Some(&child_entity)) = (uuid_to_entity.get(&parent_uuid), uuid_to_entity.get(&uuid_comp.0)) {
+                    scene.set_parent(child_entity, Some(parent_entity));
+                }
             }
         }
 
@@ -307,12 +433,14 @@ pub struct SceneData {
 #[derive(Serialize, Deserialize)]
 pub struct EntityData {
     pub name: Option<Name>,
+    pub uuid: Option<EntityUuid>,
     pub transform: Option<Transform>,
     pub pbr_material: Option<PBRMaterial>,
     pub point_light: Option<PointLight>,
     pub rigid_body: Option<RigidBody>,
     pub collider: Option<Collider>,
     pub asset_path: Option<AssetPath>,
+    pub parent_uuid: Option<Uuid>,
 }
 
 /// 场景管理器

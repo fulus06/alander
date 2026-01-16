@@ -53,7 +53,7 @@ impl EditorUI {
             .resizable(true)
             .default_width(200.0)
             .show(ctx, |ui| {
-                if let Some(scene) = scene_manager.active_scene() {
+                if let Some(scene) = scene_manager.active_scene_mut() {
                     hierarchy::show_hierarchy(ui, scene, editor_state);
                 }
             });

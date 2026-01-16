@@ -1,8 +1,9 @@
 use rapier3d::prelude::*;
 use rapier3d::na::{Vector3, UnitQuaternion, Isometry3, Quaternion};
-use alander_core::scene::{Transform, RigidBody, Collider, RigidBodyType, ColliderShape};
-use glam::{Vec3, Quat};
+use alander_core::scene::{Transform, RigidBody, Collider, RigidBodyType, ColliderShape, GlobalTransform, Parent};
+use glam::{Vec3, Quat, Mat4};
 use bevy_ecs::prelude::*;
+use std::collections::HashMap;
 use rapier3d::pipeline::{DebugRenderPipeline, DebugRenderMode, DebugRenderStyle, DebugRenderBackend, DebugRenderObject};
 
 /// 物理管理器，封装了 Rapier3D 的世界和模拟逻辑
@@ -85,9 +86,11 @@ impl PhysicsManager {
 
     /// 将 ECS 中的实体同步到物理世界
     pub fn sync_ecs_to_physics(&mut self, world: &mut World) {
-        let mut query = world.query::<(Entity, &Transform, &mut RigidBody, Option<&mut Collider>)>();
+        let mut query = world.query::<(Entity, &GlobalTransform, &mut RigidBody, Option<&mut Collider>)>();
         
-        for (entity, transform, mut rb, mut collider) in query.iter_mut(world) {
+        for (entity, global_transform, mut rb, mut collider) in query.iter_mut(world) {
+            let matrix = global_transform.0;
+            let (scale, rot, pos) = matrix.to_scale_rotation_translation();
             // 如果还没有物理句柄，则创建物理对象
             // 1. 如果还没有物理句柄，则创建物理对象
             if rb.handle_index.is_none() {
@@ -98,8 +101,7 @@ impl PhysicsManager {
                     RigidBodyType::KinematicPositionBased => rapier3d::prelude::RigidBodyType::KinematicPositionBased,
                 };
 
-                let pos = transform.position;
-                let rot = transform.rotation;
+                
                 
                 let rigid_body = RigidBodyBuilder::new(rb_type)
                     .position(Isometry3::from_parts(
@@ -114,8 +116,7 @@ impl PhysicsManager {
 
                 // 如果有碰撞体组件，则创建对应的碰撞体
                 if let Some(ref mut col) = collider {
-                    let s = transform.scale;
-                    let abs_scale = Vec3::new(s.x.abs(), s.y.abs(), s.z.abs());
+                    let abs_scale = Vec3::new(scale.x.abs(), scale.y.abs(), scale.z.abs());
                     
                     let shape = match col.shape {
                         ColliderShape::Ball { radius } => SharedShape::ball(radius * abs_scale.x.max(abs_scale.y).max(abs_scale.z)),
@@ -139,12 +140,10 @@ impl PhysicsManager {
                 }
             }
 
-            // 2. 将 ECS Transform 同步到物理引擎 (手动编辑模式或强制同步)
+            // 2. 将 ECS GlobalTransform 同步到物理引擎 (手动编辑模式或强制同步)
             if let (Some(idx), Some(gen)) = (rb.handle_index, rb.handle_generation) {
                 let handle = RigidBodyHandle::from_raw_parts(idx, gen);
                 if let Some(body) = self.rigid_body_set.get_mut(handle) {
-                    let pos = transform.position;
-                    let rot = transform.rotation;
                     body.set_position(Isometry3::from_parts(
                         Vector3::new(pos.x, pos.y, pos.z).into(),
                         UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z))
@@ -157,8 +156,7 @@ impl PhysicsManager {
                         let col_handle = ColliderHandle::from_raw_parts(c_idx, c_gen);
                         if let Some(col_obj) = self.collider_set.get_mut(col_handle) {
                             // 重新计算形状以应用缩放
-                            let s = transform.scale;
-                            let abs_scale = Vec3::new(s.x.abs(), s.y.abs(), s.z.abs());
+                            let abs_scale = Vec3::new(scale.x.abs(), scale.y.abs(), scale.z.abs());
                             let new_shape = match col.shape {
                                 ColliderShape::Ball { radius } => SharedShape::ball(radius * abs_scale.x.max(abs_scale.y).max(abs_scale.z)),
                                 ColliderShape::Cuboid { half_extents } => {
@@ -194,16 +192,51 @@ impl PhysicsManager {
             return;
         }
 
-        let mut query = world.query::<(&RigidBody, &mut Transform)>();
-        for (rb, mut transform) in query.iter_mut(world) {
-            if let (Some(idx), Some(gen)) = (rb.handle_index, rb.handle_generation) {
-                let handle = RigidBodyHandle::from_raw_parts(idx, gen);
-                if let Some(body) = self.rigid_body_set.get(handle) {
-                    let pos = body.translation();
-                    let rot = body.rotation();
-                    
-                    transform.position = Vec3::new(pos.x, pos.y, pos.z);
-                    transform.rotation = Quat::from_xyzw(rot.i, rot.j, rot.k, rot.w);
+        // 1. 先收集所有实体的 GlobalTransform
+        let mut global_transforms = HashMap::new();
+        {
+            let mut query = world.query::<(Entity, &GlobalTransform)>();
+            for (entity, gt) in query.iter(world) {
+                global_transforms.insert(entity, gt.0);
+            }
+        }
+
+        // 2. 从物理世界收集所有 RigidBody 的当前状态
+        let mut results = Vec::new();
+        {
+            let mut query = world.query::<(Entity, &RigidBody, Option<&Parent>)>();
+            for (entity, rb, parent) in query.iter(world) {
+                if let (Some(idx), Some(gen)) = (rb.handle_index, rb.handle_generation) {
+                    let handle = RigidBodyHandle::from_raw_parts(idx, gen);
+                    if let Some(body) = self.rigid_body_set.get(handle) {
+                        let world_pos = body.translation();
+                        let world_rot = body.rotation();
+                        
+                        let world_pos_glam = Vec3::new(world_pos.x, world_pos.y, world_pos.z);
+                        let world_rot_glam = Quat::from_xyzw(world_rot.i, world_rot.j, world_rot.k, world_rot.w);
+                        
+                        results.push((entity, world_pos_glam, world_rot_glam, parent.map(|p| p.0)));
+                    }
+                }
+            }
+        }
+
+        // 3. 将数据应用回 ECS
+        for (entity, world_pos, world_rot, parent_entity) in results {
+            if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                if let Some(p) = parent_entity {
+                    if let Some(&parent_global_matrix) = global_transforms.get(&p) {
+                        let inv_parent = parent_global_matrix.inverse();
+                        let local_matrix = inv_parent * Mat4::from_rotation_translation(world_rot, world_pos);
+                        let (l_scale, l_rot, l_pos) = local_matrix.to_scale_rotation_translation();
+                        
+                        transform.position = l_pos;
+                        transform.rotation = l_rot;
+                        transform.scale = l_scale;
+                    }
+                } else {
+                    transform.position = world_pos;
+                    transform.rotation = world_rot;
                 }
             }
         }
