@@ -6,11 +6,13 @@ pub mod common;
 pub mod mesh;
 pub mod skybox;
 pub mod debug;
+pub mod post_process;
 
 pub use common::*;
 pub use mesh::*;
 pub use skybox::*;
 pub use debug::*;
+pub use post_process::*;
 
 /// 管线集合
 pub struct Pipelines {
@@ -20,14 +22,17 @@ pub struct Pipelines {
     pub skybox: SkyboxPipeline,
     /// 调试管线
     pub debug: DebugPipeline,
+    /// 后期处理管线
+    pub post_process: PostProcessPipeline,
 }
 
 impl Pipelines {
-    pub fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, hdr_filterable: bool) -> Self {
-        let mesh = MeshPipeline::new(device, config.format, hdr_filterable);
-        let skybox = SkyboxPipeline::new(device, config.format, hdr_filterable);
-        let debug = DebugPipeline::new(device, config.format);
+    pub fn new(device: &wgpu::Device, hdr_format: wgpu::TextureFormat, sdr_format: wgpu::TextureFormat, hdr_filterable: bool) -> Self {
+        let mesh = MeshPipeline::new(device, hdr_format, hdr_filterable);
+        let skybox = SkyboxPipeline::new(device, hdr_format, hdr_filterable);
+        let debug = DebugPipeline::new(device, hdr_format);
+        let post_process = PostProcessPipeline::new(device, sdr_format);
 
-        Self { mesh, skybox, debug }
+        Self { mesh, skybox, debug, post_process }
     }
 }

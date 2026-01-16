@@ -66,7 +66,7 @@ impl EditorUI {
             .default_width(250.0)
             .show(ctx, |ui| {
                 if let Some(scene) = scene_manager.active_scene_mut() {
-                    inspector::show_inspector(ui, scene, editor_state.selected_entity);
+                    inspector::show_inspector(ui, scene, editor_state);
                 }
             });
 

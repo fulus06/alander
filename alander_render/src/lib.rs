@@ -140,8 +140,8 @@ impl DeviceContext {
         // 如果 16 位支持过滤，或者 16 位不支持但 32 位支持，管线将支持过滤
         let hdr_filterable = hdr_16_filterable || hdr_32_filterable;
 
-        // 创建渲染管线
-        let pipelines = pipelines::Pipelines::new(&device, &config, hdr_filterable);
+        // 创建渲染管线 (此处使用默认 HDR 格式，Renderer 会再次覆盖)
+        let pipelines = pipelines::Pipelines::new(&device, wgpu::TextureFormat::Rgba16Float, config.format, hdr_filterable);
 
         Ok(Self {
             adapter,

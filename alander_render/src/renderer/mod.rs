@@ -66,8 +66,14 @@ pub struct Renderer {
     debug_overlay_vertex_count: u32,
     /// 当前视图矩阵 (用于 CPU 侧计算)
     pub view_matrix: cgmath::Matrix4<f32>,
-    /// 当前投影矩阵 (用于 CPU 侧计算)
+    /// 投影矩阵 (用于 CPU 侧计算)
     pub proj_matrix: cgmath::Matrix4<f32>,
+    /// HDR 颜色纹理视图 (中间渲染目标)
+    hdr_view: wgpu::TextureView,
+    /// 后期处理采样器
+    post_proc_sampler: wgpu::Sampler,
+    /// 后期处理绑定组
+    post_proc_bind_group: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -132,7 +138,26 @@ impl Renderer {
             caps.hdr_32_filterable
         };
 
-        let pipelines = Pipelines::new(ctx.device(), ctx.config(), hdr_filterable);
+        let pipelines = Pipelines::new(ctx.device(), caps.preferred_hdr_format, ctx.config().format, hdr_filterable);
+
+        let hdr_view = Self::create_hdr_texture(ctx.device(), ctx.config(), caps.preferred_hdr_format);
+        let post_proc_sampler = ctx.device().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("后期处理采样器"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let post_proc_bind_group = Self::create_post_proc_bind_group(
+            ctx.device(),
+            &pipelines.post_process.bind_group_layout,
+            &hdr_view,
+            &post_proc_sampler,
+        );
 
         let skybox_texture = crate::texture::Texture::create_dummy_cubemap(ctx.device(), ctx.queue())
             .map_err(|_| RenderError::RequestDevice)?;
@@ -209,6 +234,9 @@ impl Renderer {
             debug_overlay_vertex_count: 0,
             view_matrix: cgmath::Matrix4::identity(),
             proj_matrix: cgmath::Matrix4::identity(),
+            hdr_view,
+            post_proc_sampler,
+            post_proc_bind_group,
         })
     }
 
@@ -220,6 +248,15 @@ impl Renderer {
         let depth_view =
             Self::create_depth_texture(self.ctx.device(), self.ctx.config(), "深度纹理");
         self.depth_view = depth_view;
+
+        // 重新创建 HDR 纹理与绑定组
+        self.hdr_view = Self::create_hdr_texture(self.ctx.device(), self.ctx.config(), self.caps.preferred_hdr_format);
+        self.post_proc_bind_group = Self::create_post_proc_bind_group(
+            self.ctx.device(),
+            &self.pipelines.post_process.bind_group_layout,
+            &self.hdr_view,
+            &self.post_proc_sampler,
+        );
     }
 
     /// 更新相机
@@ -401,26 +438,48 @@ impl Renderer {
 
     /// 获取视图投影矩阵 (glam 格式)
     pub fn view_proj_glam(&self) -> glam::Mat4 {
-        use cgmath::Matrix;
         let vp = self.proj_matrix * self.view_matrix;
         let raw: [[f32; 4]; 4] = vp.into();
         glam::Mat4::from_cols_array_2d(&raw)
     }
 
     /// 渲染场景
-    pub fn render_scene(&self, view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
-        let mut ctx = RenderContext {
-            device: self.ctx.device(),
-            queue: self.ctx.queue(),
-            encoder,
-            view,
-            depth_view: &self.depth_view,
-        };
+    pub fn render_scene(&self, target_view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
+        // 1. 主场景 HDR 渲染阶段 (渲染到 hdr_view)
+        {
+            let mut ctx = RenderContext {
+                device: self.ctx.device(),
+                queue: self.ctx.queue(),
+                encoder,
+                view: &self.hdr_view,
+                depth_view: &self.depth_view,
+            };
 
-        self.render_skybox(&mut ctx);
-        self.render_opaque(&mut ctx);
-        self.render_debug(&mut ctx);
-        self.render_debug_overlay(&mut ctx);
+            self.render_skybox(&mut ctx);
+            self.render_opaque(&mut ctx);
+            self.render_debug(&mut ctx);
+            self.render_debug_overlay(&mut ctx);
+        }
+
+        // 2. 后期处理阶段 (HDR -> ToneMap -> Gamma -> target_view)
+        {
+            let mut post_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("后期处理通道"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            post_pass.set_pipeline(&self.pipelines.post_process.pipeline);
+            post_pass.set_bind_group(0, &self.post_proc_bind_group, &[]);
+            post_pass.draw(0..3, 0..1);
+        }
     }
 
     /// 天空盒渲染阶段
@@ -768,6 +827,47 @@ impl Renderer {
                 p.far,
             ),
         }
+    }
+
+    fn create_hdr_texture(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, format: wgpu::TextureFormat) -> wgpu::TextureView {
+        let size = wgpu::Extent3d {
+            width: config.width,
+            height: config.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("HDR 颜色缓冲"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    fn create_post_proc_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        hdr_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("后期处理绑定组"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
     }
 }
 

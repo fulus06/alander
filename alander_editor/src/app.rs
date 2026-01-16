@@ -8,6 +8,7 @@ use alander_core::{
     InputState, RenderState, Time,
 };
 use alander_render::renderer::Renderer;
+use bevy_ecs::prelude::*;
 
 use crate::scene_manager::{SceneManager, Scene};
 use crate::physics_manager::PhysicsManager;
@@ -26,6 +27,8 @@ pub struct EditorState {
     pub show_colliders: bool,
     /// 此时正在 UI 中拖拽的实体
     pub dragged_entity: Option<bevy_ecs::entity::Entity>,
+    /// 当前激活的场景相机实体
+    pub active_camera_entity: Option<bevy_ecs::entity::Entity>,
 }
 
 /// 应用程序状态
@@ -145,6 +148,7 @@ impl AlanderApp {
                 orbit_controller: OrbitController::default(),
                 show_colliders: false,
                 dragged_entity: None,
+                active_camera_entity: None,
             },
             command_manager: CommandManager::new(50),
             camera,
@@ -398,19 +402,68 @@ impl AlanderApp {
             }
 
             // 2. 将逻辑变更同步到物理世界并执行步进
-            // 这样确保下一帧的拾取 (在 WindowsEvent 中) 使用的是最新的物理世界
             self.physics_manager.integration_parameters.dt = delta_time;
             self.physics_manager.sync_ecs_to_physics(&mut scene.world);
             self.physics_manager.step();
             self.physics_manager.sync_physics_to_ecs(&mut scene.world);
             self.physics_manager.update_query_pipeline();
 
+            // 3. 收集并更新调试线框 (碰撞体 + 视锥体)
+            let mut debug_vertices = Vec::new();
+
+            // 物理碰撞体
             if self.editor_state.show_colliders {
-                let collider_lines = self.physics_manager.render_debug_lines();
-                self.renderer.update_debug_lines(&collider_lines);
-            } else {
-                self.renderer.update_debug_lines(&[]);
+                debug_vertices.extend(self.physics_manager.render_debug_lines());
             }
+
+            // 相机视锥体
+            let mut camera_query = scene.world.query::<(Entity, &Camera, &GlobalTransform)>();
+            for (entity, camera, gt) in camera_query.iter(&scene.world) {
+                // 不为当前工作的视口相机或编辑器相机显示视锥体
+                if Some(entity) == self.editor_state.active_camera_entity {
+                    continue;
+                }
+
+                let camera_proj: glam::Mat4 = camera.compute_projection_matrix();
+                let world_matrix: glam::Mat4 = gt.0;
+                let inv_view_proj: glam::Mat4 = (camera_proj * world_matrix.inverse()).inverse();
+                let ndc_points = [
+                    glam::Vec3::new(-1.0, -1.0, -1.0), glam::Vec3::new(1.0, -1.0, -1.0),
+                    glam::Vec3::new(1.0, 1.0, -1.0), glam::Vec3::new(-1.0, 1.0, -1.0),
+                    glam::Vec3::new(-1.0, -1.0, 1.0), glam::Vec3::new(1.0, -1.0, 1.0),
+                    glam::Vec3::new(1.0, 1.0, 1.0), glam::Vec3::new(-1.0, 1.0, 1.0),
+                ];
+
+                let mut world_points = Vec::with_capacity(8);
+                for p in ndc_points {
+                    let p_h = inv_view_proj * glam::Vec4::from((p, 1.0));
+                    world_points.push(glam::Vec3::new(p_h.x / p_h.w, p_h.y / p_h.w, p_h.z / p_h.w));
+                }
+
+                let color = [1.0, 1.0, 0.0, 1.0]; // 黄色线框
+                let push_line = |v: &mut Vec<alander_render::pipelines::DebugVertex>, a: glam::Vec3, b: glam::Vec3| {
+                    v.push(alander_render::pipelines::DebugVertex { position: a.into(), color });
+                    v.push(alander_render::pipelines::DebugVertex { position: b.into(), color });
+                };
+
+                // 近平面
+                push_line(&mut debug_vertices, world_points[0], world_points[1]);
+                push_line(&mut debug_vertices, world_points[1], world_points[2]);
+                push_line(&mut debug_vertices, world_points[2], world_points[3]);
+                push_line(&mut debug_vertices, world_points[3], world_points[0]);
+                // 远平面
+                push_line(&mut debug_vertices, world_points[4], world_points[5]);
+                push_line(&mut debug_vertices, world_points[5], world_points[6]);
+                push_line(&mut debug_vertices, world_points[6], world_points[7]);
+                push_line(&mut debug_vertices, world_points[7], world_points[4]);
+                // 连接
+                push_line(&mut debug_vertices, world_points[0], world_points[4]);
+                push_line(&mut debug_vertices, world_points[1], world_points[5]);
+                push_line(&mut debug_vertices, world_points[2], world_points[6]);
+                push_line(&mut debug_vertices, world_points[3], world_points[7]);
+            }
+
+            self.renderer.update_debug_lines(&debug_vertices);
 
             // 同步光源与渲染对象
             Self::sync_scene_to_renderer_static(&mut self.renderer, scene);
@@ -426,7 +479,29 @@ impl AlanderApp {
             self.fps_update_timer = 0.0;
         }
 
-        self.renderer.update_camera(&self.camera, &self.camera_transform);
+        // 同步相机到渲染器
+        let mut camera_synced = false;
+        if let Some(scene) = self.scene_manager.active_scene() {
+            if let Some(active_entity) = self.editor_state.active_camera_entity {
+                if let (Some(camera), Some(gt)) = (
+                    scene.world.get::<Camera>(active_entity),
+                    scene.world.get::<GlobalTransform>(active_entity)
+                ) {
+                    let (_, rot, pos) = gt.0.to_scale_rotation_translation();
+                    let transform = Transform {
+                        position: pos,
+                        rotation: rot,
+                        scale: glam::Vec3::ONE,
+                    };
+                    self.renderer.update_camera(camera, &transform);
+                    camera_synced = true;
+                }
+            }
+        }
+
+        if !camera_synced {
+            self.renderer.update_camera(&self.camera, &self.camera_transform);
+        }
     }
 
     fn sync_scene_to_renderer_static(renderer: &mut Renderer, scene: &mut Scene) {

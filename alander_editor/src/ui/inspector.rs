@@ -1,15 +1,17 @@
 use egui;
 use bevy_ecs::prelude::*;
 use crate::scene_manager::Scene;
-use alander_core::scene::{Name, Transform, PointLight, PBRMaterial, RigidBody, Collider, RigidBodyType};
+use alander_core::scene::{Name, Transform, PointLight, PBRMaterial, RigidBody, Collider, RigidBodyType, Camera, Projection};
 use glam::{EulerRot, Vec3, Vec4, Quat};
+use crate::app::EditorState;
 
 /// 渲染属性面板
 pub fn show_inspector(
     ui: &mut egui::Ui,
     scene: &mut Scene,
-    selected_entity: Option<Entity>,
+    editor_state: &mut EditorState,
 ) {
+    let selected_entity = editor_state.selected_entity;
     ui.heading("属性面板");
     ui.separator();
     
@@ -175,6 +177,42 @@ pub fn show_inspector(
                 ui.label("弹性");
                 ui.add(egui::DragValue::new(&mut col.restitution).speed(0.01).clamp_range(0.0..=1.0));
             });
+        });
+    }
+
+    // 7. 相机 (Camera) 编辑
+    let mut camera_query = scene.world.query::<&mut Camera>();
+    if let Ok(mut camera) = camera_query.get_mut(&mut scene.world, entity) {
+        ui.collapsing("相机 (Camera)", |ui| {
+            let mut is_active = Some(entity) == editor_state.active_camera_entity;
+            if ui.checkbox(&mut is_active, "激活此相机").changed() {
+                if is_active {
+                    editor_state.active_camera_entity = Some(entity);
+                } else {
+                    editor_state.active_camera_entity = None;
+                }
+            }
+
+            match &mut camera.projection {
+                Projection::Perspective(ref mut p) => {
+                    ui.label("透视投影 (Perspective)");
+                    ui.horizontal(|ui| {
+                        ui.label("Fov (Y)");
+                        let mut fov_deg = p.fov_y.to_degrees();
+                        if ui.add(egui::DragValue::new(&mut fov_deg).speed(0.1).clamp_range(1.0..=179.0)).changed() {
+                            p.fov_y = fov_deg.to_radians();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("近平面");
+                        ui.add(egui::DragValue::new(&mut p.near).speed(0.01).clamp_range(0.001..=10.0));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("远平面");
+                        ui.add(egui::DragValue::new(&mut p.far).speed(1.0).clamp_range(0.1..=10000.0));
+                    });
+                }
+            }
         });
     }
 }
