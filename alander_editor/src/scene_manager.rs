@@ -88,7 +88,7 @@ impl Scene {
                     renderer.default_texture(),
                     glam::Mat4::IDENTITY,
                     MaterialBuffer::default(),
-                    &renderer.samplers.linear_clamp,
+                    &renderer.resources.samplers.linear_clamp,
                 );
                 
                 let render_uuid = uuid::Uuid::new_v4();
@@ -217,9 +217,9 @@ impl Scene {
                         let sub_name = asset_path.sub_asset.as_deref().unwrap_or("");
                         if let Some(gltf_mesh) = model.meshes.iter().find(|m| m.data.name == sub_name || sub_name.is_empty()) {
                             // 获取对应的纹理
-                            let diffuse_texture = renderer.get_texture_from_index(model, gltf_mesh, texture_map, 0);
-                            let normal_texture = renderer.get_texture_from_index(model, gltf_mesh, texture_map, 1);
-                            let mr_texture = renderer.get_texture_from_index(model, gltf_mesh, texture_map, 2);
+                            let diffuse_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, texture_map, 0);
+                            let normal_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, texture_map, 1);
+                            let mr_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, texture_map, 2);
 
                             // 构造材质标志
                             let mut material_buffer = MaterialBuffer::default();
@@ -252,7 +252,7 @@ impl Scene {
                                 mr_texture,
                                 glam::Mat4::IDENTITY,
                                 material_buffer,
-                                &renderer.samplers.linear_clamp,
+                                &renderer.resources.samplers.linear_clamp,
                             );
                             let render_uuid = uuid::Uuid::new_v4();
                             renderer.add_object(render_uuid, scene_object);
@@ -398,7 +398,7 @@ impl SceneManager {
                 &renderer.pipelines().mesh.texture_bind_group_layout,
                 &renderer.pipelines().mesh.material_bind_group_layout,
                 renderer.default_texture(),
-                &renderer.samplers.linear_clamp,
+                &renderer.resources.samplers.linear_clamp,
             );
             let ground_uuid = uuid::Uuid::new_v4();
             renderer.add_object(ground_uuid, ground_object);

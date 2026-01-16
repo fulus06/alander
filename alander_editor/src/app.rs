@@ -242,7 +242,10 @@ impl AlanderApp {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if *button == MouseButton::Left && *state == ElementState::Pressed && is_in_viewport {
-                    self.pick_entity();
+                    // 如果鼠标下有 Gizmo，不进行场景拾取
+                    if self.gizmo_manager.hovered_axis.is_none() {
+                        self.pick_entity();
+                    }
                 }
                 self.input.mouse_buttons.insert(*button, *state);
                 
@@ -306,17 +309,7 @@ impl AlanderApp {
 
     pub fn update(&mut self, delta_time: f32) {
         if let Some(scene) = self.scene_manager.active_scene_mut() {
-            self.physics_manager.integration_parameters.dt = delta_time;
-            self.physics_manager.sync_ecs_to_physics(&mut scene.world);
-            self.physics_manager.step();
-            self.physics_manager.sync_physics_to_ecs(&mut scene.world);
-
-            if self.editor_state.show_colliders {
-                let debug_lines = self.physics_manager.render_debug_lines();
-                self.renderer.update_debug_lines(&debug_lines);
-            } else {
-                self.renderer.update_debug_lines(&[]);
-            }
+            // 1. 逻辑更新 (如 Gizmo)
 
             // Gizmo 更新
             let mouse_pos = self.input.mouse_position;
@@ -327,7 +320,10 @@ impl AlanderApp {
             let is_left_pressed = self.input.mouse_button_pressed(MouseButton::Left);
             
             self.gizmo_manager.update(
-                &ray, 
+                &ray,
+                glam::Vec2::new(mouse_pos.x, mouse_pos.y),
+                glam::Vec2::new(window_size.width as f32, window_size.height as f32),
+                self.renderer.view_proj_glam(),
                 is_left_pressed, 
                 self.editor_state.selected_entity, 
                 &mut scene.world, 
@@ -337,14 +333,25 @@ impl AlanderApp {
             if let Some(entity) = self.editor_state.selected_entity {
                 if let Some(transform) = scene.world.get::<Transform>(entity) {
                     let gizmo_lines = self.gizmo_manager.render(transform, self.camera_transform.position);
-                    if self.editor_state.show_colliders {
-                        let mut all_lines = self.physics_manager.render_debug_lines();
-                        all_lines.extend(gizmo_lines);
-                        self.renderer.update_debug_lines(&all_lines);
-                    } else {
-                        self.renderer.update_debug_lines(&gizmo_lines);
-                    }
+                    self.renderer.update_debug_overlay(&gizmo_lines);
                 }
+            } else {
+                self.renderer.update_debug_overlay(&[]);
+            }
+
+            // 2. 将逻辑变更同步到物理世界并执行步进
+            // 这样确保下一帧的拾取 (在 WindowsEvent 中) 使用的是最新的物理世界
+            self.physics_manager.integration_parameters.dt = delta_time;
+            self.physics_manager.sync_ecs_to_physics(&mut scene.world);
+            self.physics_manager.step();
+            self.physics_manager.sync_physics_to_ecs(&mut scene.world);
+            self.physics_manager.update_query_pipeline();
+
+            if self.editor_state.show_colliders {
+                let collider_lines = self.physics_manager.render_debug_lines();
+                self.renderer.update_debug_lines(&collider_lines);
+            } else {
+                self.renderer.update_debug_lines(&[]);
             }
 
             // 同步光源与渲染对象

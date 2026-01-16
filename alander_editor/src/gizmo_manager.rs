@@ -1,4 +1,4 @@
-use glam::{Vec3, Quat};
+use glam::{Vec3, Quat, Vec2, Mat4};
 use alander_core::math::Ray;
 use alander_core::scene::Transform;
 use alander_render::pipelines::DebugVertex;
@@ -56,6 +56,9 @@ impl GizmoManager {
     pub fn update(
         &mut self,
         ray: &Ray,
+        mouse_pos: Vec2,
+        window_size: Vec2,
+        view_proj: Mat4,
         is_mouse_pressed: bool,
         selected_entity: Option<Entity>,
         world: &mut World,
@@ -96,7 +99,7 @@ impl GizmoManager {
             }
         } else {
             // 未拖拽，进行拾取检测
-            self.hovered_axis = self.pick_gizmo(ray, &transform, gizmo_scale);
+            self.hovered_axis = self.pick_gizmo(ray, &transform, gizmo_scale, mouse_pos, window_size, view_proj);
 
             if is_mouse_pressed && self.hovered_axis.is_some() {
                 self.active_axis = self.hovered_axis;
@@ -112,7 +115,15 @@ impl GizmoManager {
     }
 
     /// 拾取 Gizmo 句柄
-    fn pick_gizmo(&self, ray: &Ray, transform: &Transform, scale: f32) -> Option<GizmoAxis> {
+    fn pick_gizmo(
+        &self, 
+        ray: &Ray, 
+        transform: &Transform, 
+        scale: f32, 
+        mouse_pos: Vec2, 
+        window_size: Vec2, 
+        view_proj: Mat4
+    ) -> Option<GizmoAxis> {
         let pos = transform.position;
         let axes = [
             (GizmoAxis::X, Vec3::X),
@@ -121,24 +132,33 @@ impl GizmoManager {
         ];
 
         let mut best_axis = None;
-        let mut min_dist = 0.2 * scale; // 拾取阈值
+        let mut min_dist = 15.0; // 屏幕空间拾取阈值 (像素)
 
         match self.mode {
             GizmoMode::Translate | GizmoMode::Scale => {
                 for (axis, dir) in axes {
-                    let axis_end = pos + dir * scale;
-                    if let Some(dist) = ray_to_segment_dist(ray.origin, ray.direction, pos, axis_end) {
-                        if dist < min_dist {
-                            min_dist = dist;
-                            best_axis = Some(axis);
-                        }
+                    let axis_start_2d = self.world_to_screen(pos, view_proj, window_size);
+                    let axis_end_2d = self.world_to_screen(pos + dir * scale, view_proj, window_size);
+                    
+                    let dist = distance_to_segment_2d(mouse_pos, axis_start_2d, axis_end_2d);
+                    if dist < min_dist {
+                        min_dist = dist;
+                        best_axis = Some(axis);
                     }
                 }
             }
             GizmoMode::Rotate => {
-                // 旋转模式下检测射线与圆环的距离
                 for (axis, normal) in axes {
-                    if let Some(dist) = ray_to_circle_dist(ray.origin, ray.direction, pos, normal, scale) {
+                    // 简化圆环拾取：采样圆环上的多个点投影到 2D
+                    let segments = 32;
+                    let (t1, t2) = find_orthonormal_basis(normal);
+                    
+                    for i in 0..segments {
+                        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                        let p = pos + (t1 * angle.cos() + t2 * angle.sin()) * scale;
+                        let p_2d = self.world_to_screen(p, view_proj, window_size);
+                        
+                        let dist = mouse_pos.distance(p_2d);
                         if dist < min_dist {
                             min_dist = dist;
                             best_axis = Some(axis);
@@ -149,6 +169,14 @@ impl GizmoManager {
         }
 
         best_axis
+    }
+
+    /// 世界坐标转屏幕像素坐标
+    fn world_to_screen(&self, point: Vec3, view_proj: Mat4, window_size: Vec2) -> Vec2 {
+        let clip = view_proj.project_point3(point);
+        let screen_x = (clip.x + 1.0) * 0.5 * window_size.x;
+        let screen_y = (1.0 - clip.y) * 0.5 * window_size.y;
+        Vec2::new(screen_x, screen_y)
     }
 
     /// 初始化拖拽数据
@@ -353,31 +381,6 @@ fn ray_plane_intersection(ray_origin: Vec3, ray_dir: Vec3, plane_pos: Vec3, plan
     Some(ray_origin + ray_dir * t)
 }
 
-/// 射线到圆环的最短距离
-fn ray_to_circle_dist(ray_origin: Vec3, ray_dir: Vec3, center: Vec3, normal: Vec3, radius: f32) -> Option<f32> {
-    if let Some(hit_point) = ray_plane_intersection(ray_origin, ray_dir, center, normal) {
-        let dist_to_center = (hit_point - center).length();
-        return Some((dist_to_center - radius).abs());
-    }
-    None
-}
-
-/// 计算射线与线段的最短距离
-fn ray_to_segment_dist(ray_origin: Vec3, ray_dir: Vec3, p0: Vec3, p1: Vec3) -> Option<f32> {
-    let (t_ray, t_seg) = ray_to_line_closest_points(ray_origin, ray_dir, p0, (p1 - p0).normalize())?;
-    
-    // 限制在片段范围内
-    let segment_len = (p1 - p0).length();
-    let clamped_t_seg = t_seg.clamp(0.0, segment_len);
-    
-    // 如果射线的 t < 0，说明在射线起点后方
-    if t_ray < 0.0 { return None; }
-
-    let closest_on_ray = ray_origin + ray_dir * t_ray;
-    let closest_on_seg = p0 + (p1 - p0).normalize() * clamped_t_seg;
-    
-    Some((closest_on_ray - closest_on_seg).length())
-}
 
 /// 计算两条直线（射线 vs 无限直线）最接近的两个点的参数 t1, t2
 fn ray_to_line_closest_points(o1: Vec3, d1: Vec3, o2: Vec3, d2: Vec3) -> Option<(f32, f32)> {
@@ -397,4 +400,13 @@ fn ray_to_line_closest_points(o1: Vec3, d1: Vec3, o2: Vec3, d2: Vec3) -> Option<
     let t2 = (a * f - b * c) / det;
     
     Some((t1, t2))
+}
+
+/// 计算点到线段的像素距离 (2D)
+fn distance_to_segment_2d(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let l2 = a.distance_squared(b);
+    if l2 == 0.0 { return p.distance(a); }
+    let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
+    let t = t.clamp(0.0, 1.0);
+    p.distance(a + t * (b - a))
 }

@@ -89,6 +89,7 @@ impl PhysicsManager {
         
         for (entity, transform, mut rb, mut collider) in query.iter_mut(world) {
             // 如果还没有物理句柄，则创建物理对象
+            // 1. 如果还没有物理句柄，则创建物理对象
             if rb.handle_index.is_none() {
                 let rb_type = match rb.body_type {
                     RigidBodyType::Static => rapier3d::prelude::RigidBodyType::Fixed,
@@ -113,52 +114,77 @@ impl PhysicsManager {
 
                 // 如果有碰撞体组件，则创建对应的碰撞体
                 if let Some(ref mut col) = collider {
+                    let s = transform.scale;
+                    let abs_scale = Vec3::new(s.x.abs(), s.y.abs(), s.z.abs());
+                    
                     let shape = match col.shape {
-                        ColliderShape::Ball { radius } => SharedShape::ball(radius),
+                        ColliderShape::Ball { radius } => SharedShape::ball(radius * abs_scale.x.max(abs_scale.y).max(abs_scale.z)),
                         ColliderShape::Cuboid { half_extents } => {
-                            SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                            SharedShape::cuboid(half_extents.x * abs_scale.x, half_extents.y * abs_scale.y, half_extents.z * abs_scale.z)
                         }
                         ColliderShape::Capsule { half_height, radius } => {
-                            SharedShape::capsule_y(half_height, radius)
+                            SharedShape::capsule_y(half_height * abs_scale.y, radius * abs_scale.x.max(abs_scale.z))
                         }
                     };
 
                     let collider_obj = ColliderBuilder::new(shape)
                         .friction(col.friction)
                         .restitution(col.restitution)
-                        .user_data(entity.to_bits() as u128) // 存储 ECS Entity ID
+                        .user_data(entity.to_bits() as u128)
                         .build();
                     
                     let col_handle = self.collider_set.insert_with_parent(collider_obj, handle, &mut self.rigid_body_set);
                     col.handle_index = Some(col_handle.into_raw_parts().0);
                     col.handle_generation = Some(col_handle.into_raw_parts().1);
-                } else {
-                    // 如果碰撞体已经存在，确保其 user_data 是最新的 (防止旧碰撞体无法拾取)
-                    let col_handle = ColliderHandle::from_raw_parts(
-                        collider.as_ref().unwrap().handle_index.unwrap(),
-                        collider.as_ref().unwrap().handle_generation.unwrap()
-                    );
-                    if let Some(col_obj) = self.collider_set.get_mut(col_handle) {
-                        col_obj.user_data = entity.to_bits() as u128;
-                    }
                 }
-            } else {
-                // 如果模拟没运行，允许从 Transform 同步到物理引擎（手动编辑模式）
-                if !self.is_running {
-                    let handle = RigidBodyHandle::from_raw_parts(rb.handle_index.unwrap(), rb.handle_generation.unwrap());
-                    if let Some(body) = self.rigid_body_set.get_mut(handle) {
-                        let pos = transform.position;
-                        let rot = transform.rotation;
-                        body.set_position(Isometry3::from_parts(
-                            Vector3::new(pos.x, pos.y, pos.z).into(),
-                            UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z))
-                        ), true);
+            }
+
+            // 2. 将 ECS Transform 同步到物理引擎 (手动编辑模式或强制同步)
+            if let (Some(idx), Some(gen)) = (rb.handle_index, rb.handle_generation) {
+                let handle = RigidBodyHandle::from_raw_parts(idx, gen);
+                if let Some(body) = self.rigid_body_set.get_mut(handle) {
+                    let pos = transform.position;
+                    let rot = transform.rotation;
+                    body.set_position(Isometry3::from_parts(
+                        Vector3::new(pos.x, pos.y, pos.z).into(),
+                        UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z))
+                    ), true);
+                }
+
+                // 同步碰撞体形状 (如果存在)
+                if let Some(mut col) = collider {
+                    if let (Some(c_idx), Some(c_gen)) = (col.handle_index, col.handle_generation) {
+                        let col_handle = ColliderHandle::from_raw_parts(c_idx, c_gen);
+                        if let Some(col_obj) = self.collider_set.get_mut(col_handle) {
+                            // 重新计算形状以应用缩放
+                            let s = transform.scale;
+                            let abs_scale = Vec3::new(s.x.abs(), s.y.abs(), s.z.abs());
+                            let new_shape = match col.shape {
+                                ColliderShape::Ball { radius } => SharedShape::ball(radius * abs_scale.x.max(abs_scale.y).max(abs_scale.z)),
+                                ColliderShape::Cuboid { half_extents } => {
+                                    SharedShape::cuboid(half_extents.x * abs_scale.x, half_extents.y * abs_scale.y, half_extents.z * abs_scale.z)
+                                }
+                                ColliderShape::Capsule { half_height, radius } => {
+                                    SharedShape::capsule_y(half_height * abs_scale.y, radius * abs_scale.x.max(abs_scale.z))
+                                }
+                            };
+                            col_obj.set_shape(new_shape);
+                            col_obj.user_data = entity.to_bits() as u128; // 确保 user_data 正确
+                        }
                     }
                 }
             }
         }
 
-        // 重要：同步完成后必须更新查询管线，否则射线检测会滞后一帧或使用旧位置
+        // 重要：手动设置物体位置后，必须传播到碰撞体
+        self.rigid_body_set.propagate_modified_body_positions_to_colliders(&mut self.collider_set);
+
+        // 重要：同步完成后必须更新查询管线
+        self.update_query_pipeline();
+    }
+
+    /// 更新场景查询管线 (用于射线检测等)
+    pub fn update_query_pipeline(&mut self) {
         self.query_pipeline.update(&self.rigid_body_set, &self.collider_set);
     }
 
