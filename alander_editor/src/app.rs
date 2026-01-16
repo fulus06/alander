@@ -249,8 +249,13 @@ impl AlanderApp {
         let left_px = 200.0 * scale_factor;
         let right_px = window_size.width as f32 - 250.0 * scale_factor;
         let top_px = 30.0 * scale_factor;
+        let bottom_px = window_size.height as f32 - 150.0 * scale_factor; // 各种底部面板的高度
         
-        let is_in_viewport = mouse_pos.x > left_px && mouse_pos.x < right_px && mouse_pos.y > top_px;
+        let is_in_viewport = if right_px > left_px && bottom_px > top_px {
+            mouse_pos.x > left_px && mouse_pos.x < right_px && mouse_pos.y > top_px && mouse_pos.y < bottom_px
+        } else {
+            false
+        };
 
         match event {
             WindowEvent::Resized(size) => {
@@ -286,23 +291,26 @@ impl AlanderApp {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let egui_wants_input = self.egui_context.wants_pointer_input();
+                let is_pressed = *state == ElementState::Pressed;
                 
-                if *button == MouseButton::Left && *state == ElementState::Pressed && is_in_viewport && !egui_wants_input {
-                    // 如果鼠标下有 Gizmo，不进行场景拾取
+                // 左键处理：拾取 (仅当不在 UI 上时)
+                if *button == MouseButton::Left && is_pressed && is_in_viewport && !egui_wants_input {
                     if self.gizmo_manager.hovered_axis.is_none() {
                         self.pick_entity();
                     }
                 }
-                self.input.mouse_buttons.insert(*button, *state);
-                
-                if is_in_viewport && !egui_wants_input {
-                    if *button == MouseButton::Middle {
-                        self.editor_state.orbit_controller.is_dragging = *state == ElementState::Pressed;
-                        if *state == ElementState::Pressed {
-                            self.editor_state.orbit_controller.last_mouse_pos = (mouse_pos.x, mouse_pos.y);
-                        }
+
+                // 中键处理：旋转 (即使在 CentralPanel 上也允许，因为它是透明视口)
+                if *button == MouseButton::Middle {
+                    if is_pressed && is_in_viewport {
+                        self.editor_state.orbit_controller.is_dragging = true;
+                        self.editor_state.orbit_controller.last_mouse_pos = (mouse_pos.x, mouse_pos.y);
+                    } else if !is_pressed {
+                        self.editor_state.orbit_controller.is_dragging = false;
                     }
                 }
+
+                self.input.mouse_buttons.insert(*button, *state);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.input.mouse_position = Vec2::new(position.x as f32, position.y as f32);
