@@ -460,6 +460,7 @@ impl SceneManager {
     pub fn create_test_scene(&mut self, renderer: &mut Renderer) -> SceneHandle {
         let handle = self.create_scene("测试场景");
         if let Some(scene) = self.active_scene_mut() {
+            // 1. 创建地面
             let ground_object = create_cube(
                 renderer.device(), &renderer.pipelines().mesh.model_bind_group_layout, &renderer.pipelines().mesh.texture_bind_group_layout,
                 &renderer.pipelines().mesh.material_bind_group_layout, renderer.default_texture(), &renderer.resources.samplers.linear_clamp,
@@ -473,8 +474,67 @@ impl SceneManager {
                 BoundingBox { local: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)), world: AABB::new(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)) },
                 PBRMaterial { base_color: glam::Vec4::new(0.5, 0.5, 0.5, 1.0), metallic: 0.1, roughness: 0.8, emissive: glam::Vec3::ZERO },
                 RigidBody::new(RigidBodyType::Static),
-                Collider::cuboid(5.0, 0.05, 5.0),
+                Collider::cuboid(0.5, 0.5, 0.5), // 使用单位大小，缩放由 Transform 控制
             ));
+
+            // 2. 创建主光源
+            scene.create_entity((
+                Name("主光源".to_string()),
+                Transform::from_translation(glam::Vec3::new(4.0, 5.0, 4.0)),
+                PointLight {
+                    color: glam::Vec3::new(1.0, 1.0, 1.0),
+                    intensity: 100.0,
+                    range: 20.0,
+                },
+            ));
+
+            // 3. 创建相机实体
+            scene.create_entity((
+                Name("主相机".to_string()),
+                Transform::from_translation(glam::Vec3::new(0.0, 2.0, 5.0)),
+                Camera::perspective(45.0f32.to_radians(), 16.0 / 9.0, 0.1, 1000.0),
+            ));
+
+            // 4. 加载并创建两个立方体
+            if let Ok((mesh_handle, render_id, bbox, asset_path)) = scene.load_mesh(renderer, "cube") {
+                // 立方体 A
+                scene.create_entity((
+                    Name("立方体 A".to_string()),
+                    Transform::from_translation(glam::Vec3::new(-1.5, 2.5, 0.0)),
+                    Mesh { handle: mesh_handle.clone() },
+                    render_id,
+                    bbox.clone(),
+                    asset_path.clone(),
+                    PBRMaterial {
+                        base_color: glam::Vec4::new(1.0, 0.3, 0.3, 1.0), // 红色
+                        metallic: 0.8,
+                        roughness: 0.2,
+                        emissive: glam::Vec3::ZERO,
+                    },
+                    RigidBody::new(RigidBodyType::Dynamic),
+                    Collider::cuboid(0.5, 0.5, 0.5),
+                ));
+
+                // 立方体 B
+                if let Ok((mesh_handle_b, render_id_b, bbox_b, asset_path_b)) = scene.load_mesh(renderer, "cube") {
+                    scene.create_entity((
+                        Name("立方体 B".to_string()),
+                        Transform::from_translation(glam::Vec3::new(1.5, 5.0, 0.0)),
+                        Mesh { handle: mesh_handle_b },
+                        render_id_b,
+                        bbox_b,
+                        asset_path_b,
+                        PBRMaterial {
+                            base_color: glam::Vec4::new(0.3, 1.0, 0.3, 1.0), // 绿色
+                            metallic: 0.1,
+                            roughness: 0.9,
+                            emissive: glam::Vec3::ZERO,
+                        },
+                        RigidBody::new(RigidBodyType::Dynamic),
+                        Collider::cuboid(0.5, 0.5, 0.5),
+                    ));
+                }
+            }
         }
         handle
     }
