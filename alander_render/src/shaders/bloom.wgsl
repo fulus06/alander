@@ -44,7 +44,7 @@ fn fs_extract(in: VertexOutput) -> @location(0) vec4<f32> {
 // 2. 高斯模糊片元着色器 (分离式: 水平/垂直)
 @fragment
 fn fs_blur_h(in: VertexOutput) -> @location(0) vec4<f32> {
-    let weight = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    var weight = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
     let tex_offset = 1.0 / vec2<f32>(textureDimensions(t_input));
     
     var result = textureSample(t_input, s_input, in.uv).rgb * weight[0];
@@ -57,7 +57,7 @@ fn fs_blur_h(in: VertexOutput) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_blur_v(in: VertexOutput) -> @location(0) vec4<f32> {
-    let weight = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    var weight = array<f32, 5>(0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
     let tex_offset = 1.0 / vec2<f32>(textureDimensions(t_input));
     
     var result = textureSample(t_input, s_input, in.uv).rgb * weight[0];
