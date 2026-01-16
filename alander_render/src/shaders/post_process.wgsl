@@ -20,10 +20,23 @@ fn vs_main(
 var t_diffuse: texture_2d<f32>;
 @group(0) @binding(1)
 var s_diffuse: sampler;
+@group(0) @binding(2)
+var t_bloom: texture_2d<f32>;
+
+struct BloomSettings {
+    threshold: f32,
+    intensity: f32,
+}
+@group(0) @binding(3)
+var<uniform> settings: BloomSettings;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let hdr_color = textureSample(t_diffuse, s_diffuse, in.uv).rgb;
+    let raw_color = textureSample(t_diffuse, s_diffuse, in.uv).rgb;
+    let bloom_color = textureSample(t_bloom, s_diffuse, in.uv).rgb;
+    
+    // 合成 HDR 颜色与泛光
+    let hdr_color = raw_color + bloom_color * settings.intensity;
     
     // 1. Reinhard Tone Mapping
     let mapped = hdr_color / (hdr_color + vec3<f32>(1.0));

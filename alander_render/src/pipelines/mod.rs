@@ -24,6 +24,8 @@ pub struct Pipelines {
     pub debug: DebugPipeline,
     /// 后期处理管线
     pub post_process: PostProcessPipeline,
+    /// Bloom 管线
+    pub bloom: BloomPipeline,
 }
 
 impl Pipelines {
@@ -32,7 +34,8 @@ impl Pipelines {
         let skybox = SkyboxPipeline::new(device, hdr_format, hdr_filterable);
         let debug = DebugPipeline::new(device, hdr_format);
         let post_process = PostProcessPipeline::new(device, sdr_format);
+        let bloom = BloomPipeline::new(device, hdr_format);
 
-        Self { mesh, skybox, debug, post_process }
+        Self { mesh, skybox, debug, post_process, bloom }
     }
 }

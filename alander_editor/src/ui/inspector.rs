@@ -18,6 +18,17 @@ pub fn show_inspector(
     let entity = match selected_entity {
         Some(e) => e,
         None => {
+            ui.collapsing("渲染预览设置 (Rendering)", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Bloom 阈值");
+                    ui.add(egui::Slider::new(&mut editor_state.bloom_threshold, 0.0..=5.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Bloom 强度");
+                    ui.add(egui::Slider::new(&mut editor_state.bloom_intensity, 0.0..=2.0));
+                });
+            });
+
             ui.vertical_centered(|ui| {
                 ui.label("未选中任何实体");
             });

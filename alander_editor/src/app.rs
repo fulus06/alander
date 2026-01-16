@@ -16,6 +16,7 @@ use crate::gizmo_manager::{GizmoManager, GizmoMode};
 use crate::camera_controller::OrbitController;
 use crate::ui::{EditorUI, MenuAction};
 use crate::editor_command::CommandManager;
+use sysinfo::{System, SystemExt, ProcessExt};
 
 /// 编辑器状态
 pub struct EditorState {
@@ -29,6 +30,18 @@ pub struct EditorState {
     pub dragged_entity: Option<bevy_ecs::entity::Entity>,
     /// 当前激活的场景相机实体
     pub active_camera_entity: Option<bevy_ecs::entity::Entity>,
+    /// 当前 FPS
+    pub fps: f32,
+    /// 内存占用 (MB)
+    pub memory_usage: f64,
+    /// Bloom 阈值
+    pub bloom_threshold: f32,
+    /// Bloom 强度
+    pub bloom_intensity: f32,
+    /// 选中的资源路径
+    pub selected_asset_path: Option<std::path::PathBuf>,
+    /// 资源预览纹理 ID (egui)
+    pub asset_preview_texture: Option<egui::TextureHandle>,
 }
 
 /// 应用程序状态
@@ -92,6 +105,9 @@ pub struct AlanderApp {
 
     /// 显示的帧时间
     pub displayed_delta_time: f32,
+
+    /// 系统信息 (供统计使用)
+    pub system_info: System,
 }
 
 impl AlanderApp {
@@ -149,6 +165,12 @@ impl AlanderApp {
                 show_colliders: false,
                 dragged_entity: None,
                 active_camera_entity: None,
+                fps: 0.0,
+                memory_usage: 0.0,
+                bloom_threshold: 1.0,
+                bloom_intensity: 0.5,
+                selected_asset_path: None,
+                asset_preview_texture: None,
             },
             command_manager: CommandManager::new(50),
             camera,
@@ -167,6 +189,7 @@ impl AlanderApp {
             editor_ui: EditorUI::new(),
             fps_update_timer: 0.0,
             displayed_delta_time: 0.0,
+            system_info: System::new_all(),
         };
 
         // 完成后续初始化
@@ -326,6 +349,21 @@ impl AlanderApp {
     }
 
     pub fn update(&mut self, delta_time: f32) {
+        // 更新统计数据
+        self.fps_update_timer += delta_time;
+        if self.fps_update_timer >= 0.5 {
+            self.editor_state.fps = 1.0 / delta_time;
+            
+            // 更新内存统计
+            self.system_info.refresh_process(sysinfo::get_current_pid().unwrap());
+            if let Some(process) = self.system_info.process(sysinfo::get_current_pid().unwrap()) {
+                self.editor_state.memory_usage = process.memory() as f64 / 1024.0 / 1024.0;
+            }
+            
+            self.displayed_delta_time = delta_time;
+            self.fps_update_timer = 0.0;
+        }
+
         if let Some(scene) = self.scene_manager.active_scene_mut() {
             // 0. 首先更新层级变换，确保逻辑和 Gizmo 使用的是最新的世界位姿
             scene.update_hierarchy();
@@ -562,6 +600,12 @@ impl AlanderApp {
     }
 
     pub fn render(&mut self) -> Result<()> {
+        // 更新 Bloom 设置到渲染器
+        self.renderer.update_bloom_settings(alander_render::renderer::BloomSettings {
+            threshold: self.editor_state.bloom_threshold,
+            intensity: self.editor_state.bloom_intensity,
+        });
+
         let output = self.renderer.surface().get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.renderer.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {

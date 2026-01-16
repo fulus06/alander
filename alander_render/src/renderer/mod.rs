@@ -74,7 +74,27 @@ pub struct Renderer {
     post_proc_sampler: wgpu::Sampler,
     /// 后期处理绑定组
     post_proc_bind_group: wgpu::BindGroup,
+    /// Bloom 设置缓冲区
+    bloom_settings_buffer: wgpu::Buffer,
+    /// Bloom 提取绑定组
+    bloom_extract_bind_group: wgpu::BindGroup,
+    /// Bloom 模糊绑定组 (0: H, 1: V)
+    bloom_blur_bind_groups: [wgpu::BindGroup; 2],
+    /// Bloom 纹理视图 (0: 提取/中间, 1: 模糊结果)
+    bloom_texture_views: [wgpu::TextureView; 2],
+    /// Bloom 原始纹理 (需保持生命周期)
+    bloom_textures: [wgpu::Texture; 2],
 }
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct BloomSettings {
+    pub threshold: f32,
+    pub intensity: f32,
+}
+
+unsafe impl bytemuck::Pod for BloomSettings {}
+unsafe impl bytemuck::Zeroable for BloomSettings {}
 
 impl Renderer {
     /// 创建新的渲染器
@@ -141,6 +161,7 @@ impl Renderer {
         let pipelines = Pipelines::new(ctx.device(), caps.preferred_hdr_format, ctx.config().format, hdr_filterable);
 
         let hdr_view = Self::create_hdr_texture(ctx.device(), ctx.config(), caps.preferred_hdr_format);
+        // 后期处理采样器
         let post_proc_sampler = ctx.device().create_sampler(&wgpu::SamplerDescriptor {
             label: Some("后期处理采样器"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -151,13 +172,6 @@ impl Renderer {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-
-        let post_proc_bind_group = Self::create_post_proc_bind_group(
-            ctx.device(),
-            &pipelines.post_process.bind_group_layout,
-            &hdr_view,
-            &post_proc_sampler,
-        );
 
         let skybox_texture = crate::texture::Texture::create_dummy_cubemap(ctx.device(), ctx.queue())
             .map_err(|_| RenderError::RequestDevice)?;
@@ -216,6 +230,62 @@ impl Renderer {
             ],
         });
 
+        // Bloom 初始化
+        let bloom_settings = BloomSettings {
+            threshold: 1.0,
+            intensity: 0.5,
+        };
+        let bloom_settings_buffer = ctx.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Bloom 设置缓冲区"),
+            contents: bytemuck::cast_slice(&[bloom_settings]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let (bloom_textures, bloom_texture_views) = Self::create_bloom_textures(ctx.device(), ctx.config(), caps.preferred_hdr_format);
+        
+        let bloom_extract_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bloom 提取绑定组"),
+            layout: &pipelines.bloom.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hdr_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&post_proc_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: bloom_settings_buffer.as_entire_binding() },
+            ],
+        });
+
+        let bloom_blur_bind_groups = [
+            ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom 模糊绑定组 H"),
+                layout: &pipelines.bloom.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_texture_views[0]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&post_proc_sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: bloom_settings_buffer.as_entire_binding() },
+                ],
+            }),
+            ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom 模糊绑定组 V"),
+                layout: &pipelines.bloom.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_texture_views[1]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&post_proc_sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: bloom_settings_buffer.as_entire_binding() },
+                ],
+            }),
+        ];
+
+        // 重新创建后期处理绑定组以包含 Bloom
+        let post_proc_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("后期处理绑定组 (含 Bloom)"),
+            layout: &pipelines.post_process.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&hdr_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&post_proc_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&bloom_texture_views[0]) }, // 最终模糊结果
+                wgpu::BindGroupEntry { binding: 3, resource: bloom_settings_buffer.as_entire_binding() },
+            ],
+        });
+
         Ok(Self {
             ctx,
             caps,
@@ -237,6 +307,11 @@ impl Renderer {
             hdr_view,
             post_proc_sampler,
             post_proc_bind_group,
+            bloom_settings_buffer,
+            bloom_extract_bind_group,
+            bloom_blur_bind_groups,
+            bloom_texture_views,
+            bloom_textures,
         })
     }
 
@@ -251,12 +326,54 @@ impl Renderer {
 
         // 重新创建 HDR 纹理与绑定组
         self.hdr_view = Self::create_hdr_texture(self.ctx.device(), self.ctx.config(), self.caps.preferred_hdr_format);
-        self.post_proc_bind_group = Self::create_post_proc_bind_group(
-            self.ctx.device(),
-            &self.pipelines.post_process.bind_group_layout,
-            &self.hdr_view,
-            &self.post_proc_sampler,
-        );
+
+        // 重新创建 Bloom 资源
+        let (bloom_textures, bloom_views) = Self::create_bloom_textures(self.ctx.device(), self.ctx.config(), self.caps.preferred_hdr_format);
+        self.bloom_textures = bloom_textures;
+        self.bloom_texture_views = bloom_views;
+
+        // 刷新所有后期处理相关的绑定组
+        self.bloom_extract_bind_group = self.ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bloom 提取绑定组"),
+            layout: &self.pipelines.bloom.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.post_proc_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.bloom_settings_buffer.as_entire_binding() },
+            ],
+        });
+
+        self.bloom_blur_bind_groups = [
+            self.ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom 模糊绑定组 H"),
+                layout: &self.pipelines.bloom.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.bloom_texture_views[0]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.post_proc_sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.bloom_settings_buffer.as_entire_binding() },
+                ],
+            }),
+            self.ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom 模糊绑定组 V"),
+                layout: &self.pipelines.bloom.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.bloom_texture_views[1]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.post_proc_sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.bloom_settings_buffer.as_entire_binding() },
+                ],
+            }),
+        ];
+
+        self.post_proc_bind_group = self.ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("后期处理绑定组"),
+            layout: &self.pipelines.post_process.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.hdr_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.post_proc_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.bloom_texture_views[0]) },
+                wgpu::BindGroupEntry { binding: 3, resource: self.bloom_settings_buffer.as_entire_binding() },
+            ],
+        });
     }
 
     /// 更新相机
@@ -322,6 +439,15 @@ impl Renderer {
             &self.light_buffer,
             0,
             bytemuck::bytes_of(lights),
+        );
+    }
+
+    /// 更新 Bloom 设置
+    pub fn update_bloom_settings(&self, settings: BloomSettings) {
+        self.ctx.queue().write_buffer(
+            &self.bloom_settings_buffer,
+            0,
+            bytemuck::bytes_of(&settings),
         );
     }
 
@@ -461,7 +587,10 @@ impl Renderer {
             self.render_debug_overlay(&mut ctx);
         }
 
-        // 2. 后期处理阶段 (HDR -> ToneMap -> Gamma -> target_view)
+        // 2. Bloom 阶段
+        self.render_bloom(encoder);
+
+        // 3. 后期处理阶段 (HDR + Bloom -> ToneMap -> Gamma -> target_view)
         {
             let mut post_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("后期处理通道"),
@@ -479,6 +608,57 @@ impl Renderer {
             post_pass.set_pipeline(&self.pipelines.post_process.pipeline);
             post_pass.set_bind_group(0, &self.post_proc_bind_group, &[]);
             post_pass.draw(0..3, 0..1);
+        }
+    }
+
+    /// Bloom 渲染阶段
+    fn render_bloom(&self, encoder: &mut wgpu::CommandEncoder) {
+        // 1. 提取亮度
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom 提取通道"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_views[0],
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: true },
+                })],
+                depth_stencil_attachment: None,
+            });
+            pass.set_pipeline(&self.pipelines.bloom.extract_pipeline);
+            pass.set_bind_group(0, &self.bloom_extract_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // 2. 水平模糊 (0 -> 1)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom 水平模糊通道"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_views[1],
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: true },
+                })],
+                depth_stencil_attachment: None,
+            });
+            pass.set_pipeline(&self.pipelines.bloom.blur_h_pipeline);
+            pass.set_bind_group(0, &self.bloom_blur_bind_groups[0], &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // 3. 垂直模糊 (1 -> 0)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom 垂直模糊通道"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_views[0],
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: true },
+                })],
+                depth_stencil_attachment: None,
+            });
+            pass.set_pipeline(&self.pipelines.bloom.blur_v_pipeline);
+            pass.set_bind_group(0, &self.bloom_blur_bind_groups[1], &[]);
+            pass.draw(0..3, 0..1);
         }
     }
 
@@ -848,26 +1028,31 @@ impl Renderer {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    fn create_post_proc_bind_group(
+    fn create_bloom_textures(
         device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        hdr_view: &wgpu::TextureView,
-        sampler: &wgpu::Sampler,
-    ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("后期处理绑定组"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(hdr_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-            ],
-        })
+        config: &wgpu::SurfaceConfiguration,
+        format: wgpu::TextureFormat,
+    ) -> ([wgpu::Texture; 2], [wgpu::TextureView; 2]) {
+        let width = config.width / 4;
+        let height = config.height / 4;
+        
+        let create_tex = || device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Bloom 渲染目标"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let t1 = create_tex();
+        let t2 = create_tex();
+        let v1 = t1.create_view(&wgpu::TextureViewDescriptor::default());
+        let v2 = t2.create_view(&wgpu::TextureViewDescriptor::default());
+
+        ([t1, t2], [v1, v2])
     }
 }
 

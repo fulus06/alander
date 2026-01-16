@@ -1,3 +1,4 @@
+pub mod asset_browser;
 pub mod hierarchy;
 pub mod inspector;
 pub mod menu_bar;
@@ -46,7 +47,7 @@ impl EditorUI {
                 ui,
                 physics_manager,
                 gizmo_manager,
-                &mut editor_state.show_colliders,
+                editor_state,
                 frame_time,
             );
         });
@@ -58,6 +59,13 @@ impl EditorUI {
                 if let Some(scene) = scene_manager.active_scene_mut() {
                     timeline::show_timeline(ui, scene, editor_state.selected_entity);
                 }
+            });
+
+        egui::TopBottomPanel::bottom("asset_browser")
+            .resizable(true)
+            .default_height(150.0)
+            .show(ctx, |ui| {
+                asset_browser::show_asset_browser(ui, editor_state, std::path::Path::new("assets"));
             });
 
         // 3. 左侧场景面板
