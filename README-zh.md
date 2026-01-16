@@ -3,6 +3,8 @@
 
 Alander 是一个基于 Rust 开发的现代化 3D 创作套件（DCC, Digital Content Creation），旨在成为 Blender 的强有力竞争者。
 
+[当前状态](./doc/alander003%20-%20物理引擎+层级.mp4)
+
 ## 项目愿景
 
 Alander 不仅仅是一个 3D 软件，而是**"面向未来的程序化 3D 引擎"**，具有以下核心差异化特点：
