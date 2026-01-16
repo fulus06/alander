@@ -187,6 +187,16 @@ pub mod scene {
             }
         }
 
+        /// 从 4x4 矩阵计算局部变换
+        pub fn from_matrix(matrix: Mat4) -> Self {
+            let (scale, rotation, position) = matrix.to_scale_rotation_translation();
+            Self {
+                position,
+                rotation,
+                scale,
+            }
+        }
+
         /// 计算变换矩阵
         pub fn compute_matrix(&self) -> Mat4 {
             Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)

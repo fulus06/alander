@@ -23,6 +23,8 @@ pub struct EditorState {
     pub orbit_controller: OrbitController,
     /// 是否显示碰撞体
     pub show_colliders: bool,
+    /// 此时正在 UI 中拖拽的实体
+    pub dragged_entity: Option<bevy_ecs::entity::Entity>,
 }
 
 /// 应用程序状态
@@ -138,6 +140,7 @@ impl AlanderApp {
                 selected_entity: None,
                 orbit_controller: OrbitController::default(),
                 show_colliders: false,
+                dragged_entity: None,
             },
             camera,
             camera_transform,
@@ -309,9 +312,10 @@ impl AlanderApp {
 
     pub fn update(&mut self, delta_time: f32) {
         if let Some(scene) = self.scene_manager.active_scene_mut() {
-            // 1. 逻辑更新 (如 Gizmo)
+            // 0. 首先更新层级变换，确保逻辑和 Gizmo 使用的是最新的世界位姿
+            scene.update_hierarchy();
 
-            // Gizmo 更新
+            // 1. 逻辑更新 (如 Gizmo)
             let mouse_pos = self.input.mouse_position;
             let window_size = self.window.inner_size();
             let x = mouse_pos.x / window_size.width as f32;
@@ -331,16 +335,11 @@ impl AlanderApp {
             );
 
             if let Some(entity) = self.editor_state.selected_entity {
-                if let Some(transform) = scene.world.get::<Transform>(entity) {
-                    let gizmo_lines = self.gizmo_manager.render(transform, self.camera_transform.position);
-                    self.renderer.update_debug_overlay(&gizmo_lines);
-                }
+                let gizmo_lines = self.gizmo_manager.render(&scene.world, entity, self.camera_transform.position);
+                self.renderer.update_debug_overlay(&gizmo_lines);
             } else {
                 self.renderer.update_debug_overlay(&[]);
             }
-
-            // 1.5 场景层级更新 (计算 GlobalTransform)
-            scene.update_hierarchy();
 
             // 2. 将逻辑变更同步到物理世界并执行步进
             // 这样确保下一帧的拾取 (在 WindowsEvent 中) 使用的是最新的物理世界

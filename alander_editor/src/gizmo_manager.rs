@@ -1,6 +1,6 @@
 use glam::{Vec3, Quat, Vec2, Mat4};
 use alander_core::math::Ray;
-use alander_core::scene::Transform;
+use alander_core::scene::{Transform, GlobalTransform, Parent};
 use alander_render::pipelines::DebugVertex;
 use bevy_ecs::prelude::*;
 
@@ -79,9 +79,22 @@ impl GizmoManager {
             None => return,
         };
 
-        // Gizmo 的视觉缩放：随着距离增加而变大，保持屏幕尺寸恒定
-        let dist = (transform.position - camera_pos).length();
-        let gizmo_scale = dist * 0.15; // 经验系数
+        // 获取实体的世界变换和父节点信息
+        let (world_pos, parent_matrix_inv) = match world.get::<GlobalTransform>(selected_entity) {
+            Some(gt) => {
+                let p_inv = if let Some(parent) = world.get::<Parent>(selected_entity) {
+                    world.get::<GlobalTransform>(parent.0).map(|pgt| pgt.0.inverse()).unwrap_or(Mat4::IDENTITY)
+                } else {
+                    Mat4::IDENTITY
+                };
+                (gt.0.transform_point3(Vec3::ZERO), p_inv)
+            }
+            None => (transform.position, Mat4::IDENTITY),
+        };
+
+        // Gizmo 的视觉缩放：根据世界位置计算
+        let dist = (world_pos - camera_pos).length();
+        let gizmo_scale = dist * 0.15;
 
         if let Some(active) = self.active_axis {
             // 正在拖拽中
@@ -90,41 +103,39 @@ impl GizmoManager {
                 return;
             }
 
-            // 执行拖拽逻辑
-            self.handle_drag(active, ray, &mut transform);
+            // 执行拖拽逻辑 (传入世界位置作为参考)
+            self.handle_drag_hierarchical(active, ray, &mut transform, world_pos, parent_matrix_inv);
             
             // 将更新后的变换写回 World
             if let Some(mut t) = world.get_mut::<Transform>(selected_entity) {
                 *t = transform;
             }
         } else {
-            // 未拖拽，进行拾取检测
-            self.hovered_axis = self.pick_gizmo(ray, &transform, gizmo_scale, mouse_pos, window_size, view_proj);
+            // 未拖拽，进行拾取检测 (使用世界位置)
+            self.hovered_axis = self.pick_gizmo_hierarchical(ray, world_pos, gizmo_scale, mouse_pos, window_size, view_proj);
 
             if is_mouse_pressed && self.hovered_axis.is_some() {
                 self.active_axis = self.hovered_axis;
                 self.initial_transform = Some(transform);
                 self.drag_start_ray = Some(*ray);
                 
-                // 初始化拖拽起始数据
+                // 初始化拖拽起始数据 (使用世界位置)
                 if let Some(axis) = self.active_axis {
-                    self.init_drag_data(axis, ray, &transform);
+                    self.init_drag_hierarchical(axis, ray, world_pos);
                 }
             }
         }
     }
 
-    /// 拾取 Gizmo 句柄
-    fn pick_gizmo(
+    fn pick_gizmo_hierarchical(
         &self, 
         ray: &Ray, 
-        transform: &Transform, 
+        world_pos: Vec3, 
         scale: f32, 
         mouse_pos: Vec2, 
         window_size: Vec2, 
         view_proj: Mat4
     ) -> Option<GizmoAxis> {
-        let pos = transform.position;
         let axes = [
             (GizmoAxis::X, Vec3::X),
             (GizmoAxis::Y, Vec3::Y),
@@ -132,13 +143,13 @@ impl GizmoManager {
         ];
 
         let mut best_axis = None;
-        let mut min_dist = 15.0; // 屏幕空间拾取阈值 (像素)
+        let mut min_dist = 15.0;
 
         match self.mode {
             GizmoMode::Translate | GizmoMode::Scale => {
                 for (axis, dir) in axes {
-                    let axis_start_2d = self.world_to_screen(pos, view_proj, window_size);
-                    let axis_end_2d = self.world_to_screen(pos + dir * scale, view_proj, window_size);
+                    let axis_start_2d = self.world_to_screen(world_pos, view_proj, window_size);
+                    let axis_end_2d = self.world_to_screen(world_pos + dir * scale, view_proj, window_size);
                     
                     let dist = distance_to_segment_2d(mouse_pos, axis_start_2d, axis_end_2d);
                     if dist < min_dist {
@@ -149,13 +160,12 @@ impl GizmoManager {
             }
             GizmoMode::Rotate => {
                 for (axis, normal) in axes {
-                    // 简化圆环拾取：采样圆环上的多个点投影到 2D
                     let segments = 32;
                     let (t1, t2) = find_orthonormal_basis(normal);
                     
                     for i in 0..segments {
                         let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-                        let p = pos + (t1 * angle.cos() + t2 * angle.sin()) * scale;
+                        let p = world_pos + (t1 * angle.cos() + t2 * angle.sin()) * scale;
                         let p_2d = self.world_to_screen(p, view_proj, window_size);
                         
                         let dist = mouse_pos.distance(p_2d);
@@ -179,8 +189,7 @@ impl GizmoManager {
         Vec2::new(screen_x, screen_y)
     }
 
-    /// 初始化拖拽数据
-    fn init_drag_data(&mut self, axis: GizmoAxis, ray: &Ray, transform: &Transform) {
+    fn init_drag_hierarchical(&mut self, axis: GizmoAxis, ray: &Ray, world_pos: Vec3) {
         let dir = match axis {
             GizmoAxis::X => Vec3::X,
             GizmoAxis::Y => Vec3::Y,
@@ -188,39 +197,24 @@ impl GizmoManager {
         };
 
         match self.mode {
-            GizmoMode::Translate => {
+            GizmoMode::Translate | GizmoMode::Scale => {
                 if let Some((_t_ray, t_axis)) = ray_to_line_closest_points(
                     ray.origin, ray.direction,
-                    transform.position, dir
+                    world_pos, dir
                 ) {
                     self.drag_start_value = t_axis;
-                    self.drag_start_point = transform.position + dir * t_axis;
-                }
-            }
-            GizmoMode::Scale => {
-                if let Some((_t_ray, t_axis)) = ray_to_line_closest_points(
-                    ray.origin, ray.direction,
-                    transform.position, dir
-                ) {
-                    self.drag_start_value = t_axis;
-                    self.drag_start_point = transform.position + dir * t_axis;
+                    self.drag_start_point = world_pos + dir * t_axis;
                 }
             }
             GizmoMode::Rotate => {
-                // 记录初始点击位置在旋转平面的投影
-                if let Some(hit_point) = ray_plane_intersection(ray.origin, ray.direction, transform.position, dir) {
+                if let Some(hit_point) = ray_plane_intersection(ray.origin, ray.direction, world_pos, dir) {
                     self.drag_start_point = hit_point;
-                    let _to_point = (hit_point - transform.position).normalize();
-                    // 记录初始角度（通过反正切）
-                    // 我们需要一个局部的 2D 坐标系在平面上
-                    // 这里简化处理：直接记录初始方向向量即可
                 }
             }
         }
     }
 
-    /// 处理拖拽
-    fn handle_drag(&mut self, axis: GizmoAxis, ray: &Ray, transform: &mut Transform) {
+    fn handle_drag_hierarchical(&mut self, axis: GizmoAxis, ray: &Ray, transform: &mut Transform, world_pos: Vec3, parent_matrix_inv: Mat4) {
         let dir = match axis {
             GizmoAxis::X => Vec3::X,
             GizmoAxis::Y => Vec3::Y,
@@ -231,20 +225,26 @@ impl GizmoManager {
             GizmoMode::Translate => {
                 if let Some((_t_ray, t_axis)) = ray_to_line_closest_points(
                     ray.origin, ray.direction,
-                    self.initial_transform.unwrap().position, dir
+                    self.drag_start_point - dir * self.drag_start_value, dir
                 ) {
-                    let delta = t_axis - self.drag_start_value;
-                    transform.position = self.initial_transform.unwrap().position + dir * delta;
+                    let delta_world = (t_axis - self.drag_start_value) * dir;
+                    let initial_world_pos = self.drag_start_point - dir * self.drag_start_value;
+                    let new_world_pos = initial_world_pos + delta_world;
+                    
+                    // 转换回局部坐标
+                    transform.position = parent_matrix_inv.transform_point3(new_world_pos);
                 }
             }
             GizmoMode::Scale => {
+                // 缩放逻辑暂时保持与局部一致，或者根据需求映射
                 if let Some((_t_ray, t_axis)) = ray_to_line_closest_points(
                     ray.origin, ray.direction,
-                    self.initial_transform.unwrap().position, dir
+                    world_pos, dir
                 ) {
                     let delta = t_axis - self.drag_start_value;
                     let initial_scale = self.initial_transform.unwrap().scale;
-                    let scale_factor = 1.0 + delta / (self.initial_transform.unwrap().position.distance(self.drag_start_point).max(0.1));
+                    let ref_dist = (self.drag_start_point - world_pos).length().max(0.1);
+                    let scale_factor = 1.0 + delta / ref_dist;
                     
                     match axis {
                         GizmoAxis::X => transform.scale.x = initial_scale.x * scale_factor,
@@ -254,29 +254,48 @@ impl GizmoManager {
                 }
             }
             GizmoMode::Rotate => {
-                if let Some(hit_point) = ray_plane_intersection(ray.origin, ray.direction, transform.position, dir) {
-                    let start_dir = (self.drag_start_point - transform.position).normalize();
-                    let current_dir = (hit_point - transform.position).normalize();
+                if let Some(hit_point) = ray_plane_intersection(ray.origin, ray.direction, world_pos, dir) {
+                    let start_dir = (self.drag_start_point - world_pos).normalize();
+                    let current_dir = (hit_point - world_pos).normalize();
                     
-                    // 计算夹角
                     let dot = start_dir.dot(current_dir).clamp(-1.0, 1.0);
                     let angle = dot.acos();
-                    
-                    // 确定旋转方向
                     let cross = start_dir.cross(current_dir);
                     let sign = if cross.dot(dir) >= 0.0 { 1.0 } else { -1.0 };
                     
                     let rotation_delta = Quat::from_axis_angle(dir, angle * sign);
-                    transform.rotation = rotation_delta * self.initial_transform.unwrap().rotation;
+                    
+                    // 世界旋转变换
+                    let initial_quat = self.initial_transform.unwrap().rotation;
+                    // 由于目前的 Transform.rotation 是局部的，如果父节点有旋转，这里的世界旋转增量需要处理
+                    // 但简单起见，如果 Gizmo 始终是世界轴，我们可以把 new_world_rotation 转回 local
+                    
+                    // 获取父节点的全局旋转
+                    let (_, parent_rot, _) = parent_matrix_inv.inverse().to_scale_rotation_translation();
+                    let world_quat = parent_rot * initial_quat;
+                    let new_world_quat = rotation_delta * world_quat;
+                    
+                    transform.rotation = parent_rot.inverse() * new_world_quat;
                 }
             }
         }
     }
 
     /// 生成渲染线段
-    pub fn render(&self, transform: &Transform, camera_pos: Vec3) -> Vec<DebugVertex> {
+    pub fn render(&self, world: &World, selected_entity: Entity, camera_pos: Vec3) -> Vec<DebugVertex> {
         let mut vertices = Vec::new();
-        let pos = transform.position;
+        
+        // 获取世界位置
+        let pos = match world.get::<GlobalTransform>(selected_entity) {
+            Some(gt) => gt.0.transform_point3(Vec3::ZERO),
+            None => {
+                match world.get::<Transform>(selected_entity) {
+                    Some(t) => t.position,
+                    None => return vertices,
+                }
+            }
+        };
+
         let dist = (pos - camera_pos).length();
         let scale = dist * 0.15;
 

@@ -84,8 +84,18 @@ impl Scene {
         true
     }
     
-    /// 设置父子关系
+    /// 设置父子关系，并保持世界坐标不变
     pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) {
+        // 0. 计算当子节点前的世界变换 (用于保持位置)
+        let child_global = self.world.get::<GlobalTransform>(child)
+            .map(|gt| gt.0)
+            .unwrap_or_else(|| {
+                // 如果没有 GlobalTransform，则尝试从当前 Transform 计算 (通常应已有)
+                self.world.get::<Transform>(child)
+                    .map(|t| t.compute_matrix())
+                    .unwrap_or(glam::Mat4::IDENTITY)
+            });
+
         // 1. 先从旧父节点移除
         if let Some(old_parent_comp) = self.world.get::<Parent>(child) {
             let old_parent = old_parent_comp.0;
@@ -106,8 +116,21 @@ impl Scene {
             } else {
                 self.world.entity_mut(p).insert(Children(vec![child]));
             }
+
+            // 3. 计算相对于新父节点的局部变换
+            let parent_global_inv = self.world.get::<GlobalTransform>(p)
+                .map(|gt| gt.0.inverse())
+                .unwrap_or(glam::Mat4::IDENTITY);
+            
+            let new_local_matrix = parent_global_inv * child_global;
+            let new_transform = Transform::from_matrix(new_local_matrix);
+            self.world.entity_mut(child).insert(new_transform);
         } else {
             self.world.entity_mut(child).remove::<Parent>();
+            
+            // 3. 计算相对于世界的局部变换 (即世界变换本身)
+            let new_transform = Transform::from_matrix(child_global);
+            self.world.entity_mut(child).insert(new_transform);
         }
     }
 
