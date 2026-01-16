@@ -115,6 +115,33 @@ pub fn show_inspector(
         });
     }
 
+    // 3.5 平行光 (Directional Light) 编辑
+    let mut dir_light_query = scene.world.query::<&mut alander_core::scene::DirectionalLight>();
+    if let Ok(mut light) = dir_light_query.get_mut(&mut scene.world, entity) {
+        ui.collapsing("平行光 (Directional Light)", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("颜色");
+                let mut color_arr = [light.color.x, light.color.y, light.color.z];
+                if ui.color_edit_button_rgb(&mut color_arr).changed() {
+                    light.color = Vec3::from_slice(&color_arr);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("强度");
+                ui.add(egui::DragValue::new(&mut light.intensity).speed(0.1).clamp_range(0.0..=100.0));
+            });
+            ui.checkbox(&mut light.cast_shadows, "投射阴影");
+            ui.horizontal(|ui| {
+                ui.label("阴影偏置");
+                ui.add(egui::DragValue::new(&mut light.shadow_bias).speed(0.0001).clamp_range(0.0..=0.1));
+            });
+            ui.horizontal(|ui| {
+                ui.label("法线偏置");
+                ui.add(egui::DragValue::new(&mut light.shadow_normal_bias).speed(0.0001).clamp_range(0.0..=0.1));
+            });
+        });
+    }
+
     // 4. PBR 材质编辑
     let mut material_query = scene.world.query::<&mut PBRMaterial>();
     if let Ok(mut mat) = material_query.get_mut(&mut scene.world, entity) {

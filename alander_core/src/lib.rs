@@ -354,6 +354,28 @@ pub mod scene {
         }
     }
 
+    /// 平行光组件
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct DirectionalLight {
+        pub color: Vec3,
+        pub intensity: f32,
+        pub cast_shadows: bool,
+        pub shadow_bias: f32,
+        pub shadow_normal_bias: f32,
+    }
+
+    impl Default for DirectionalLight {
+        fn default() -> Self {
+            Self {
+                color: Vec3::ONE,
+                intensity: 1.0,
+                cast_shadows: true,
+                shadow_bias: 0.005,
+                shadow_normal_bias: 0.01,
+            }
+        }
+    }
+
     /// 刚体类型
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
     pub enum RigidBodyType {

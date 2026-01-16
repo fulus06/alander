@@ -3,7 +3,7 @@
 //! 此模块包含渲染器的主要功能和渲染循环。
 
 use super::RenderError;
-use crate::pipelines::{CameraBuffer, Pipelines, SceneObject, Vertex};
+use crate::pipelines::{CameraBuffer, Pipelines, SceneObject, Vertex, LightBuffer};
 use alander_core::scene::{Camera as CoreCamera, Transform};
 use cgmath::SquareMatrix;
 use cgmath::{Matrix4, Point3, Vector3};
@@ -84,6 +84,18 @@ pub struct Renderer {
     bloom_texture_views: [wgpu::TextureView; 2],
     /// Bloom 原始纹理 (需保持生命周期)
     bloom_textures: [wgpu::Texture; 2],
+    /// 阴影纹理
+    shadow_texture: wgpu::Texture,
+    /// 阴影纹理视图
+    shadow_view: wgpu::TextureView,
+    /// 阴影采样器
+    shadow_sampler: wgpu::Sampler,
+    /// 光空间投影缓冲区
+    light_space_buffer: wgpu::Buffer,
+    /// 光空间绑定组
+    light_space_bind_group: wgpu::BindGroup,
+    /// 阴影视图投影矩阵
+    pub shadow_view_proj: cgmath::Matrix4<f32>,
 }
 
 #[repr(C)]
@@ -148,9 +160,44 @@ impl Renderer {
             ctx.device()
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("光源缓冲区"),
-                    contents: bytemuck::bytes_of(&crate::pipelines::LightBuffer::new()),
+                    contents: bytemuck::bytes_of(&LightBuffer::new()),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
+
+        // 4. 阴影系统初始化
+        let shadow_size = 2048;
+        let shadow_texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("阴影纹理"),
+            size: wgpu::Extent3d {
+                width: shadow_size,
+                height: shadow_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = ctx.device().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("阴影采样器"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
+        let light_space_buffer = ctx.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("光空间缓冲区"),
+            contents: bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(Matrix4::identity())),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
         let hdr_filterable = if caps.preferred_hdr_format == wgpu::TextureFormat::Rgba16Float {
             caps.hdr_16_filterable
@@ -159,6 +206,17 @@ impl Renderer {
         };
 
         let pipelines = Pipelines::new(ctx.device(), caps.preferred_hdr_format, ctx.config().format, hdr_filterable);
+
+        let light_space_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("光空间绑定组"),
+            layout: &pipelines.shadow.light_space_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: light_space_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
         let hdr_view = Self::create_hdr_texture(ctx.device(), ctx.config(), caps.preferred_hdr_format);
         // 后期处理采样器
@@ -200,6 +258,18 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::Sampler(&resources.samplers.linear_clamp),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&shadow_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: light_space_buffer.as_entire_binding(),
                     },
                 ],
             });
@@ -312,7 +382,51 @@ impl Renderer {
             bloom_blur_bind_groups,
             bloom_texture_views,
             bloom_textures,
+            shadow_texture,
+            shadow_view,
+            shadow_sampler,
+            light_space_buffer,
+            light_space_bind_group,
+            shadow_view_proj: Matrix4::identity(),
         })
+    }
+
+    /// 阴影 Pass
+    pub fn render_shadow_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        objects: &[&SceneObject],
+        light_view_proj: cgmath::Matrix4<f32>,
+    ) {
+        // 更新光空间矩阵
+        self.ctx.queue().write_buffer(
+            &self.light_space_buffer,
+            0,
+            bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(light_view_proj)),
+        );
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("阴影 Pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.shadow_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: true,
+                }),
+                stencil_ops: None,
+            }),
+        });
+
+        render_pass.set_pipeline(&self.pipelines.shadow.pipeline);
+        render_pass.set_bind_group(0, &self.light_space_bind_group, &[]);
+
+        for object in objects {
+            render_pass.set_vertex_buffer(0, object.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(object.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.set_bind_group(1, &object.model_bind_group, &[]);
+            render_pass.draw_indexed(0..object.num_elements, 0, 0..1);
+        }
     }
 
     /// 调整大小
@@ -440,6 +554,37 @@ impl Renderer {
             0,
             bytemuck::bytes_of(lights),
         );
+
+        // 如果有平行光且开启了阴影，计算并更新阴影矩阵
+        // 为简单起见，目前只要 intensity > 0 就更新
+        if lights.dir_light.intensity > 0.0 {
+            use cgmath::{Point3, Vector3, ortho};
+            
+            let dir = Vector3::new(
+                lights.dir_light.direction[0],
+                lights.dir_light.direction[1],
+                lights.dir_light.direction[2],
+            );
+            
+            // 假设光从一个足够远的地方射向原点 (后续可根据物体包围盒调整)
+            let light_pos = Point3::new(-dir.x * 20.0, -dir.y * 20.0, -dir.z * 20.0);
+            let light_view = Matrix4::look_to_rh(
+                light_pos,
+                dir,
+                Vector3::unit_y(),
+            );
+            
+            // 正交投影 (覆盖 40x40 的范围，深度 0.1-100)
+            let light_proj = ortho(-20.0, 20.0, -20.0, 20.0, 0.1, 100.0);
+            
+            self.shadow_view_proj = light_proj * light_view;
+            
+            self.ctx.queue().write_buffer(
+                &self.light_space_buffer,
+                0,
+                bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(self.shadow_view_proj)),
+            );
+        }
     }
 
     /// 更新 Bloom 设置
@@ -535,6 +680,18 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&self.shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.light_space_buffer.as_entire_binding(),
                 },
             ],
         });

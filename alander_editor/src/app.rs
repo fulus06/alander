@@ -560,6 +560,23 @@ impl AlanderApp {
     fn sync_scene_to_renderer_static(renderer: &mut Renderer, scene: &mut Scene) {
         // 1. 同步光源
         let mut light_buffer = alander_render::pipelines::LightBuffer::new();
+        
+        // 同步平行光
+        let mut dir_light_query = scene.world.query::<(&Transform, &alander_core::scene::DirectionalLight)>();
+        if let Some((transform, light)) = dir_light_query.iter(&scene.world).next() {
+            let rotation = transform.rotation;
+            let direction = rotation * glam::Vec3::NEG_Z; // 假设 -Z 是主照射方向
+            
+            light_buffer.dir_light = alander_render::pipelines::DirectionalLight::new(
+                direction.into(),
+                light.color.into(),
+                light.intensity,
+                light.shadow_bias,
+                light.shadow_normal_bias,
+            );
+        }
+
+        // 同步点光源
         let mut light_query = scene.world.query::<(&GlobalTransform, &PointLight)>();
         for (global_transform, light) in light_query.iter(&scene.world) {
             // 从全局变换矩阵提取位置
@@ -644,6 +661,10 @@ impl AlanderApp {
         );
 
         // 渲染 3D 场景
+        // 获取所有可渲染对象
+        let objects: Vec<_> = self.renderer.resources.objects.values().collect();
+        self.renderer.render_shadow_pass(&mut encoder, &objects, self.renderer.shadow_view_proj);
+
         self.renderer.render_scene(&view, &mut encoder);
 
         // 渲染 EGUI 叠加

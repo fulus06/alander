@@ -7,12 +7,14 @@ pub mod mesh;
 pub mod skybox;
 pub mod debug;
 pub mod post_process;
+pub mod shadow;
 
 pub use common::*;
 pub use mesh::*;
 pub use skybox::*;
 pub use debug::*;
 pub use post_process::*;
+pub use shadow::*;
 
 /// 管线集合
 pub struct Pipelines {
@@ -26,6 +28,8 @@ pub struct Pipelines {
     pub post_process: PostProcessPipeline,
     /// Bloom 管线
     pub bloom: BloomPipeline,
+    /// 阴影管线
+    pub shadow: ShadowPipeline,
 }
 
 impl Pipelines {
@@ -35,7 +39,8 @@ impl Pipelines {
         let debug = DebugPipeline::new(device, hdr_format);
         let post_process = PostProcessPipeline::new(device, sdr_format);
         let bloom = BloomPipeline::new(device, hdr_format);
+        let shadow = ShadowPipeline::new(device);
 
-        Self { mesh, skybox, debug, post_process, bloom }
+        Self { mesh, skybox, debug, post_process, bloom, shadow }
     }
 }

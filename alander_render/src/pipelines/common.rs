@@ -94,18 +94,58 @@ impl Light {
     }
 }
 
+/// 平行光结构 (用于渲染)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DirectionalLight {
+    pub direction: [f32; 3],
+    pub shadow_bias: f32,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub shadow_normal_bias: f32,
+    pub _padding: [f32; 3],
+}
+
+impl DirectionalLight {
+    pub fn new(direction: [f32; 3], color: [f32; 3], intensity: f32, bias: f32, normal_bias: f32) -> Self {
+        Self {
+            direction,
+            shadow_bias: bias,
+            color,
+            intensity,
+            shadow_normal_bias: normal_bias,
+            _padding: [0.0; 3],
+        }
+    }
+}
+
+impl Default for DirectionalLight {
+    fn default() -> Self {
+        Self {
+            direction: [0.0, -1.0, 0.0],
+            shadow_bias: 0.005,
+            color: [1.0, 1.0, 1.0],
+            intensity: 0.0,
+            shadow_normal_bias: 0.01,
+            _padding: [0.0; 3],
+        }
+    }
+}
+
 /// 光源缓冲区
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightBuffer {
+    pub dir_light: DirectionalLight,
     pub lights: [Light; 4],
     pub light_count: u32,
-    pub _padding: [u32; 3],
+    pub _padding: [u32; 3], // 保持 16 字节对齐
 }
 
 impl LightBuffer {
     pub fn new() -> Self {
         Self {
+            dir_light: DirectionalLight::default(),
             lights: [
                 Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
                 Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
@@ -177,6 +217,21 @@ impl ModelBuffer {
     pub fn new(model: cgmath::Matrix4<f32>) -> Self {
         Self {
             model: model.into(),
+        }
+    }
+}
+
+/// 光空间缓冲区 (用于阴影映射)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LightSpaceBuffer {
+    pub view_proj: [[f32; 4]; 4],
+}
+
+impl LightSpaceBuffer {
+    pub fn new(view_proj: cgmath::Matrix4<f32>) -> Self {
+        Self {
+            view_proj: (OPENGL_TO_WGPU_MATRIX * view_proj).into(),
         }
     }
 }

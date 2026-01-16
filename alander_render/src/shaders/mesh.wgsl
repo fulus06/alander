@@ -7,11 +7,19 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) world_tangent: vec4<f32>,
+    @location(4) shadow_pos: vec3<f32>,
 };
 
 struct Camera {
     view_proj: mat4x4<f32>,
     view_position: vec3<f32>,
+};
+
+struct DirectionalLight {
+    direction: vec3<f32>,
+    shadow_bias: f32,
+    color: vec3<f32>,
+    intensity: f32,
 };
 
 struct Light {
@@ -22,6 +30,7 @@ struct Light {
 };
 
 struct LightBuffer {
+    dir_light: DirectionalLight,
     lights: array<Light, 4>,
     light_count: u32,
 };
@@ -36,6 +45,14 @@ var t_irradiance: texture_cube<f32>;
 var t_prefilter: texture_cube<f32>;
 @group(0) @binding(4)
 var s_ibl: sampler;
+
+// 阴影相关绑定
+@group(0) @binding(5)
+var t_shadow: texture_depth_2d;
+@group(0) @binding(6)
+var s_shadow: sampler_comparison;
+@group(0) @binding(7)
+var<uniform> light_space: mat4x4<f32>;
 
 @group(1) @binding(0)
 var<uniform> model: mat4x4<f32>;
@@ -78,6 +95,11 @@ fn vs_main(
     out.world_tangent = vec4<f32>(normalize((model * vec4<f32>(tangent.xyz, 0.0)).xyz), tangent.w);
     out.clip_position = camera.view_proj * world_pos;
     out.uv = uv;
+
+    // 计算阴影坐标
+    let pos_from_light = light_space * world_pos;
+    // 转换到 [0, 1] 范围
+    out.shadow_pos = vec3<f32>(pos_from_light.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5), pos_from_light.z);
 
     return out;
 }
@@ -125,6 +147,22 @@ fn fresnelSchlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+// 阴影采样 (PCF)
+fn fetch_shadow(shadow_pos: vec3<f32>, bias: f32) -> f32 {
+    var visibility = 0.0;
+    let size = 1.0 / 2048.0; // 同步初始化时的分辨率
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let offset = vec2<f32>(f32(x) * size, f32(y) * size);
+            visibility += textureSampleCompare(t_shadow, s_shadow, shadow_pos.xy + offset, shadow_pos.z - bias);
+        }
+    }
+    
+    let result = visibility / 9.0;
+    let in_bounds = shadow_pos.x >= 0.0 && shadow_pos.x <= 1.0 && shadow_pos.y >= 0.0 && shadow_pos.y <= 1.0;
+    return select(1.0, result, in_bounds);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(t_diffuse, s_common, in.uv);
@@ -158,8 +196,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     F0 = mix(F0, albedo, metallic);
 
     var Lo = vec3<f32>(0.0);
-    
-    // 遍历所有光源
+
+    // 1. 处理平行光
+    if (light_buffer.dir_light.intensity > 0.0) {
+        let L = normalize(-light_buffer.dir_light.direction);
+        let H = normalize(V + L);
+        let radiance = light_buffer.dir_light.color * light_buffer.dir_light.intensity;
+        let shadow = fetch_shadow(in.shadow_pos, light_buffer.dir_light.shadow_bias);
+
+        let NDF = DistributionGGX(N, H, roughness);
+        let G   = GeometrySmith(N, V, L, roughness);
+        let F   = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+        let numerator    = NDF * G * F;
+        let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+        let specular = numerator / denominator;
+
+        let kS = F;
+        var kD = vec3<f32>(1.0) - kS;
+        kD = kD * (1.0 - metallic);
+
+        let NdotL = max(dot(N, L), 0.0);
+        Lo += (kD * albedo / PI + specular) * radiance * NdotL * shadow;
+    }
+
+    // 2. 遍历所有点光源
     for (var i: u32 = 0u; i < light_buffer.light_count; i = i + 1u) {
         let light = light_buffer.lights[i];
         
