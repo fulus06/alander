@@ -74,22 +74,45 @@ impl CameraBuffer {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Light {
     pub position: [f32; 3],
-    pub _padding1: f32,
+    pub light_type: u32, // 0: Point, 1: Spot
     pub color: [f32; 3],
     pub intensity: f32,
     pub range: f32,
-    pub _padding2: [f32; 3],
+    pub inner_angle: f32,
+    pub outer_angle: f32,
+    pub shadow_bias: f32,
+    pub direction: [f32; 3],
+    pub _padding: f32,
 }
 
 impl Light {
-    pub fn new(position: [f32; 3], color: [f32; 3], intensity: f32, range: f32) -> Self {
+    pub fn point(position: [f32; 3], color: [f32; 3], intensity: f32, range: f32) -> Self {
         Self {
             position,
-            _padding1: 0.0,
+            light_type: 0,
             color,
             intensity,
             range,
-            _padding2: [0.0; 3],
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            shadow_bias: 0.0,
+            direction: [0.0, -1.0, 0.0],
+            _padding: 0.0,
+        }
+    }
+
+    pub fn spot(position: [f32; 3], color: [f32; 3], intensity: f32, range: f32, direction: [f32; 3], inner: f32, outer: f32, bias: f32) -> Self {
+        Self {
+            position,
+            light_type: 1,
+            color,
+            intensity,
+            range,
+            inner_angle: inner,
+            outer_angle: outer,
+            shadow_bias: bias,
+            direction,
+            _padding: 0.0,
         }
     }
 }
@@ -147,10 +170,10 @@ impl LightBuffer {
         Self {
             dir_light: DirectionalLight::default(),
             lights: [
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
-                Light::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
+                Light::point([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
+                Light::point([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
+                Light::point([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
+                Light::point([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, 0.0),
             ],
             light_count: 0,
             _padding: [0, 0, 0],
@@ -221,17 +244,23 @@ impl ModelBuffer {
     }
 }
 
-/// 光空间缓冲区 (用于阴影映射)
+/// 光空间缓冲区 (用于阴影映射 - 支持 CSM)
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightSpaceBuffer {
-    pub view_proj: [[f32; 4]; 4],
+    pub view_projs: [[[f32; 4]; 4]; 4],
+    pub split_distances: [f32; 4],
 }
 
 impl LightSpaceBuffer {
-    pub fn new(view_proj: cgmath::Matrix4<f32>) -> Self {
+    pub fn new(view_projs: [cgmath::Matrix4<f32>; 4], splits: [f32; 4]) -> Self {
+        let mut vp = [[[0.0; 4]; 4]; 4];
+        for i in 0..4 {
+            vp[i] = (OPENGL_TO_WGPU_MATRIX * view_projs[i]).into();
+        }
         Self {
-            view_proj: (OPENGL_TO_WGPU_MATRIX * view_proj).into(),
+            view_projs: vp,
+            split_distances: splits,
         }
     }
 }

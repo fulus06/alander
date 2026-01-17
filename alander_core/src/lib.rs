@@ -359,6 +359,7 @@ pub mod scene {
     pub struct DirectionalLight {
         pub color: Vec3,
         pub intensity: f32,
+        pub direction: Vec3,
         pub cast_shadows: bool,
         pub shadow_bias: f32,
         pub shadow_normal_bias: f32,
@@ -369,9 +370,36 @@ pub mod scene {
             Self {
                 color: Vec3::ONE,
                 intensity: 1.0,
+                direction: Vec3::new(0.0, -1.0, 0.0),
                 cast_shadows: true,
                 shadow_bias: 0.005,
                 shadow_normal_bias: 0.01,
+            }
+        }
+    }
+
+    /// 聚光灯组件
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct SpotLight {
+        pub color: Vec3,
+        pub intensity: f32,
+        pub range: f32,
+        pub inner_angle: f32, // 弧度
+        pub outer_angle: f32, // 弧度
+        pub cast_shadows: bool,
+        pub shadow_bias: f32,
+    }
+
+    impl Default for SpotLight {
+        fn default() -> Self {
+            Self {
+                color: Vec3::ONE,
+                intensity: 1.0,
+                range: 10.0,
+                inner_angle: 0.0,
+                outer_angle: std::f32::consts::FRAC_PI_4,
+                cast_shadows: true,
+                shadow_bias: 0.005,
             }
         }
     }

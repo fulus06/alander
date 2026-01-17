@@ -5,8 +5,7 @@
 use super::RenderError;
 use crate::pipelines::{CameraBuffer, Pipelines, SceneObject, Vertex, LightBuffer};
 use alander_core::scene::{Camera as CoreCamera, Transform};
-use cgmath::SquareMatrix;
-use cgmath::{Matrix4, Point3, Vector3};
+use cgmath::{Matrix4, Point3, Vector3, SquareMatrix};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -94,8 +93,18 @@ pub struct Renderer {
     light_space_buffer: wgpu::Buffer,
     /// 光空间绑定组
     light_space_bind_group: wgpu::BindGroup,
-    /// 阴影视图投影矩阵
+    /// 阴影视图投影矩阵 (旧的，保持兼容)
     pub shadow_view_proj: cgmath::Matrix4<f32>,
+    /// CSM 级联数量
+    pub csm_cascades: usize,
+    /// CSM 各级联的视图投影矩阵
+    pub csm_view_projs: Vec<cgmath::Matrix4<f32>>,
+    /// CSM 各级联的分割距离
+    pub csm_split_distances: Vec<f32>,
+    /// 点光源阴影立方体纹理
+    shadow_cube_texture: wgpu::Texture,
+    /// 点光源阴影立方体视图
+    shadow_cube_view: wgpu::TextureView,
 }
 
 #[repr(C)]
@@ -181,6 +190,29 @@ impl Renderer {
             view_formats: &[],
         });
         let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 4b. 点光源阴影立方体映射初始化
+        let shadow_cube_size = 512;
+        let shadow_cube_texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("点光源阴影立方体纹理"),
+            size: wgpu::Extent3d {
+                width: shadow_cube_size,
+                height: shadow_cube_size,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_cube_view = shadow_cube_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("点光源阴影立方体视图"),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
         let shadow_sampler = ctx.device().create_sampler(&wgpu::SamplerDescriptor {
             label: Some("阴影采样器"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -195,7 +227,10 @@ impl Renderer {
 
         let light_space_buffer = ctx.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("光空间缓冲区"),
-            contents: bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(Matrix4::identity())),
+            contents: bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(
+                [Matrix4::identity(); 4],
+                [0.0; 4]
+            )),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -270,6 +305,10 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 7,
                         resource: light_space_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&shadow_cube_view),
                     },
                 ],
             });
@@ -388,6 +427,11 @@ impl Renderer {
             light_space_buffer,
             light_space_bind_group,
             shadow_view_proj: Matrix4::identity(),
+            csm_cascades: 4,
+            csm_view_projs: vec![Matrix4::identity(); 4],
+            csm_split_distances: vec![0.0; 4],
+            shadow_cube_texture,
+            shadow_cube_view,
         })
     }
 
@@ -402,7 +446,10 @@ impl Renderer {
         self.ctx.queue().write_buffer(
             &self.light_space_buffer,
             0,
-            bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(light_view_proj)),
+            bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(
+                [light_view_proj, Matrix4::identity(), Matrix4::identity(), Matrix4::identity()],
+                [0.0; 4]
+            )),
         );
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -426,6 +473,71 @@ impl Renderer {
             render_pass.set_index_buffer(object.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.set_bind_group(1, &object.model_bind_group, &[]);
             render_pass.draw_indexed(0..object.num_elements, 0, 0..1);
+        }
+    }
+
+    /// 点光源阴影 Pass (6面)
+    pub fn render_point_shadow_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        objects: &[&SceneObject],
+        light_pos: [f32; 3],
+        range: f32,
+    ) {
+        let light_point = cgmath::Point3::new(light_pos[0], light_pos[1], light_pos[2]);
+        let proj = cgmath::perspective(cgmath::Deg(90.0), 1.0, 0.1, range);
+        
+        let directions = [
+            (cgmath::Vector3::unit_x(), cgmath::Vector3::unit_y()),   // +X
+            (cgmath::Vector3::new(-1.0, 0.0, 0.0), cgmath::Vector3::unit_y()),  // -X
+            (cgmath::Vector3::unit_y(), cgmath::Vector3::new(0.0, 0.0, -1.0)),  // +Y
+            (cgmath::Vector3::new(0.0, -1.0, 0.0), cgmath::Vector3::new(0.0, 0.0, 1.0)),   // -Y
+            (cgmath::Vector3::unit_z(), cgmath::Vector3::unit_y()),   // +Z
+            (cgmath::Vector3::new(0.0, 0.0, -1.0), cgmath::Vector3::unit_y()),  // -Z
+        ];
+
+        for i in 0..6 {
+            let (dir, up) = directions[i];
+            let view = cgmath::Matrix4::look_to_rh(light_point, dir, up);
+            let view_proj = proj * view;
+
+            self.ctx.queue().write_buffer(
+                &self.light_space_buffer,
+                0,
+                bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new([view_proj, Matrix4::identity(), Matrix4::identity(), Matrix4::identity()], [0.0; 4])),
+            );
+
+            let face_view = self.shadow_cube_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("点光源阴影面 {}", i)),
+                format: Some(wgpu::TextureFormat::Depth32Float),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: i as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(&format!("点光源阴影 Pass 面 {}", i)),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &face_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
+            });
+
+            render_pass.set_pipeline(&self.pipelines.shadow.pipeline);
+            render_pass.set_bind_group(0, &self.light_space_bind_group, &[]);
+
+            for object in objects {
+                render_pass.set_vertex_buffer(0, object.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(object.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.set_bind_group(1, &object.model_bind_group, &[]);
+                render_pass.draw_indexed(0..object.num_elements, 0, 0..1);
+            }
         }
     }
 
@@ -558,33 +670,117 @@ impl Renderer {
         // 如果有平行光且开启了阴影，计算并更新阴影矩阵
         // 为简单起见，目前只要 intensity > 0 就更新
         if lights.dir_light.intensity > 0.0 {
-            use cgmath::{Point3, Vector3, ortho};
-            
             let dir = Vector3::new(
                 lights.dir_light.direction[0],
                 lights.dir_light.direction[1],
                 lights.dir_light.direction[2],
             );
             
-            // 假设光从一个足够远的地方射向原点 (后续可根据物体包围盒调整)
-            let light_pos = Point3::new(-dir.x * 20.0, -dir.y * 20.0, -dir.z * 20.0);
+            // let _light_pos = Point3::new(-dir.x * 20.0, -dir.y * 20.0, -dir.z * 20.0);
+            // let light_view = Matrix4::look_to_rh(
+            //     light_pos,
+            //     dir,
+            //     Vector3::unit_y(),
+            // );
+            
+            // 正交投影 (覆盖 40x40 的范围，深度 0.1-100)
+            // let light_proj = ortho(-20.0, 20.0, -20.0, 20.0, 0.1, 100.0);
+            
+            // CSM 实现
+            self.update_csm_matrices(&lights.dir_light, dir);
+        }
+    }
+
+    /// 更新 CSM 矩阵
+    fn update_csm_matrices(&mut self, _dir_light: &crate::pipelines::DirectionalLight, light_dir: Vector3<f32>) {
+        let cascade_count = self.csm_cascades;
+        let near = 0.1;
+        let far = 100.0; // 这里的 far 应该取自相机的 far
+        
+        // 1. 计算分割距离 (Logarithmic Split)
+        let lambda = 0.5f32;
+        let mut splits = vec![0.0; cascade_count + 1];
+        for i in 0..=cascade_count {
+            let p = i as f32 / cascade_count as f32;
+            let log_split = near * (far / near as f32).powf(p);
+            let uniform_split = near + (far - near) * p;
+            splits[i] = lambda * log_split + (1.0 - lambda) * uniform_split;
+        }
+        self.csm_split_distances = splits[1..].to_vec();
+
+        // 2. 为每个级联计算矩阵
+        let inv_view_proj = (self.proj_matrix * self.view_matrix).invert().unwrap();
+        
+        for i in 0..cascade_count {
+            let _prev_split = splits[i];
+            let _next_split = splits[i+1];
+            
+            // 计算级联视锥体的 8 个顶点
+            let mut frustum_corners = Vec::new();
+            for z in 0..2 {
+                for y in 0..2 {
+                    for x in 0..2 {
+                        let corner = cgmath::Vector4::new(
+                            x as f32 * 2.0 - 1.0,
+                            y as f32 * 2.0 - 1.0,
+                            if z == 0 { -1.0 } else { 1.0 }, // NDC Z 范围依后端而定，这里假设映射到了 -1..1 以反旋回世界
+                            1.0,
+                        );
+                        let mut world_corner = inv_view_proj * corner;
+                        world_corner /= world_corner.w;
+                        frustum_corners.push(world_corner);
+                    }
+                }
+            }
+            
+            // 简单起见，这里按比例缩放顶点以匹配 split 距离
+            // 正确做法是根据 near/far 重新计算视锥体
+            let _center = cgmath::Point3::new(0.0, 0.0, 0.0); // 占位
+            
+            // 计算光空间包围盒
             let light_view = Matrix4::look_to_rh(
-                light_pos,
-                dir,
+                Point3::new(0.0, 0.0, 0.0), // 临时位置
+                light_dir,
                 Vector3::unit_y(),
             );
             
-            // 正交投影 (覆盖 40x40 的范围，深度 0.1-100)
-            let light_proj = ortho(-20.0, 20.0, -20.0, 20.0, 0.1, 100.0);
+            let mut min_x = f32::MAX; let mut max_x = f32::MIN;
+            let mut min_y = f32::MAX; let mut max_y = f32::MIN;
+            let mut min_z = f32::MAX; let mut max_z = f32::MIN;
             
-            self.shadow_view_proj = light_proj * light_view;
-            
-            self.ctx.queue().write_buffer(
-                &self.light_space_buffer,
-                0,
-                bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(self.shadow_view_proj)),
-            );
+            for corner in frustum_corners {
+                let light_space_corner = light_view * corner;
+                min_x = min_x.min(light_space_corner.x); max_x = max_x.max(light_space_corner.x);
+                min_y = min_y.min(light_space_corner.y); max_y = max_y.max(light_space_corner.y);
+                min_z = min_z.min(light_space_corner.z); max_z = max_z.max(light_space_corner.z);
+            }
+
+            // 扩展 Z 轴以包含视锥体外的遮挡物
+            let z_mult = 10.0;
+            if min_z < 0.0 { min_z *= z_mult; } else { min_z /= z_mult; }
+            if max_z < 0.0 { max_z /= z_mult; } else { max_z *= z_mult; }
+
+            let light_proj = cgmath::ortho(min_x, max_x, min_y, max_y, min_z, max_z);
+            self.csm_view_projs[i] = light_proj * light_view;
         }
+
+        // 保持 shadow_view_proj 为第一个级联以兼容旧逻辑
+        self.shadow_view_proj = self.csm_view_projs[0];
+        
+        let mut projs = [Matrix4::identity(); 4];
+        for j in 0..4 {
+            projs[j] = self.csm_view_projs[j];
+        }
+        let mut splits = [0.0; 4];
+        for j in 0..cascade_count {
+            splits[j] = self.csm_split_distances[j];
+        }
+
+        self.ctx.queue().write_buffer(
+            &self.light_space_buffer,
+            0,
+            bytemuck::bytes_of(&crate::pipelines::LightSpaceBuffer::new(projs, splits)),
+        );
     }
 
     /// 更新 Bloom 设置

@@ -4,7 +4,7 @@ use winit::event::{WindowEvent, ElementState, MouseButton};
 use tracing::info;
 use std::sync::Arc;
 use alander_core::{
-    scene::{Camera, Transform, PointLight, Name, RenderId, AssetPath, BoundingBox, PBRMaterial, GlobalTransform},
+    scene::{Camera, Transform, PointLight, SpotLight, Name, RenderId, AssetPath, BoundingBox, PBRMaterial, GlobalTransform},
     InputState, RenderState, Time,
 };
 use alander_render::renderer::Renderer;
@@ -589,7 +589,7 @@ impl AlanderApp {
         for (global_transform, light) in light_query.iter(&scene.world) {
             // 从全局变换矩阵提取位置
             let pos = global_transform.0.transform_point3(glam::Vec3::ZERO);
-            let render_light = alander_render::pipelines::Light::new(
+            let render_light = alander_render::pipelines::Light::point(
                 pos.into(),
                 light.color.into(),
                 light.intensity,
@@ -597,6 +597,27 @@ impl AlanderApp {
             );
             light_buffer.add_light(render_light);
         }
+
+        // 同步聚光灯
+        let mut spot_light_query = scene.world.query::<(&GlobalTransform, &SpotLight)>();
+        for (global_transform, light) in spot_light_query.iter(&scene.world) {
+            let pos = global_transform.0.transform_point3(glam::Vec3::ZERO);
+            // 假设聚光灯朝向 -Z (局部)
+            let direction = global_transform.0.transform_vector3(glam::Vec3::NEG_Z).normalize();
+            
+            let render_light = alander_render::pipelines::Light::spot(
+                pos.into(),
+                light.color.into(),
+                light.intensity,
+                light.range,
+                direction.into(),
+                light.inner_angle,
+                light.outer_angle,
+                light.shadow_bias,
+            );
+            light_buffer.add_light(render_light);
+        }
+
         renderer.update_lights(&light_buffer);
 
         // 2. 同步渲染对象
@@ -672,6 +693,16 @@ impl AlanderApp {
         // 获取所有可渲染对象
         let objects: Vec<_> = self.renderer.resources.objects.values().collect();
         self.renderer.render_shadow_pass(&mut encoder, &objects, self.renderer.shadow_view_proj);
+
+        // 简单的演示：如果有第一个点光源，渲染其全向阴影
+        // 实际开发中应该动态收集需要阴影的点光源
+        if let Some(scene) = self.scene_manager.active_scene_mut() {
+            let mut point_light_query = scene.world.query::<(&alander_core::scene::GlobalTransform, &alander_core::scene::PointLight)>();
+            if let Some((gt, light)) = point_light_query.iter(&scene.world).next() {
+                let pos = gt.0.transform_point3(glam::Vec3::ZERO);
+                self.renderer.render_point_shadow_pass(&mut encoder, &objects, pos.into(), light.range);
+            }
+        }
 
         self.renderer.render_scene(&view, &mut encoder);
 

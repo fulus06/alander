@@ -4,10 +4,15 @@
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
-    @location(1) world_normal: vec3<f32>,
+    @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) world_tangent: vec4<f32>,
-    @location(4) shadow_pos: vec3<f32>,
+    @location(3) tangent: vec3<f32>,
+    @location(4) bitangent: vec3<f32>,
+    @location(5) shadow_pos0: vec3<f32>,
+    @location(6) shadow_pos1: vec3<f32>,
+    @location(7) shadow_pos2: vec3<f32>,
+    @location(8) shadow_pos3: vec3<f32>,
+    @location(9) view_z: f32,
 };
 
 struct Camera {
@@ -24,15 +29,25 @@ struct DirectionalLight {
 
 struct Light {
     position: vec3<f32>,
+    light_type: u32, // 0: Point, 1: Spot
     color: vec3<f32>,
     intensity: f32,
     range: f32,
+    inner_angle: f32,
+    outer_angle: f32,
+    shadow_bias: f32,
+    direction: vec3<f32>,
 };
 
 struct LightBuffer {
     dir_light: DirectionalLight,
     lights: array<Light, 4>,
     light_count: u32,
+};
+
+struct LightSpace {
+    view_projs: array<mat4x4<f32>, 4>,
+    split_distances: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -52,7 +67,9 @@ var t_shadow: texture_depth_2d;
 @group(0) @binding(6)
 var s_shadow: sampler_comparison;
 @group(0) @binding(7)
-var<uniform> light_space: mat4x4<f32>;
+var<uniform> light_space: LightSpace;
+@group(0) @binding(8)
+var t_shadow_cube: texture_depth_cube;
 
 @group(1) @binding(0)
 var<uniform> model: mat4x4<f32>;
@@ -91,15 +108,32 @@ fn vs_main(
 
     let world_pos = model * vec4<f32>(position, 1.0);
     out.world_position = world_pos.xyz;
-    out.world_normal = normalize((model * vec4<f32>(normal, 0.0)).xyz);
-    out.world_tangent = vec4<f32>(normalize((model * vec4<f32>(tangent.xyz, 0.0)).xyz), tangent.w);
     out.clip_position = camera.view_proj * world_pos;
     out.uv = uv;
 
-    // 计算阴影坐标
-    let pos_from_light = light_space * world_pos;
-    // 转换到 [0, 1] 范围
-    out.shadow_pos = vec3<f32>(pos_from_light.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5), pos_from_light.z);
+    // TBN
+    let N_world = normalize((model * vec4<f32>(normal, 0.0)).xyz);
+    let T_world = normalize((model * vec4<f32>(tangent.xyz, 0.0)).xyz);
+    let B_world = normalize(cross(N_world, T_world) * tangent.w);
+    out.normal = N_world;
+    out.tangent = T_world;
+    out.bitangent = B_world;
+
+    // 阴影坐标 (CSM)
+    let pos0 = light_space.view_projs[0] * world_pos;
+    out.shadow_pos0 = vec3<f32>(pos0.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5), pos0.z);
+    
+    let pos1 = light_space.view_projs[1] * world_pos;
+    out.shadow_pos1 = vec3<f32>(pos1.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5), pos1.z);
+    
+    let pos2 = light_space.view_projs[2] * world_pos;
+    out.shadow_pos2 = vec3<f32>(pos2.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5), pos2.z);
+    
+    let pos3 = light_space.view_projs[3] * world_pos;
+    out.shadow_pos3 = vec3<f32>(pos3.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5), pos3.z);
+
+    // 视图空间深度 (用于级联选择)
+    out.view_z = out.clip_position.z; // Use clip_position.z for view space depth (after projection)
 
     return out;
 }
@@ -147,20 +181,57 @@ fn fresnelSchlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-// 阴影采样 (PCF)
+// Poisson Disk 样本点 (归一化范围)
+const POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.94201624, -0.39906216),
+    vec2<f32>(0.94558609, -0.76890725),
+    vec2<f32>(-0.09418410, -0.92938870),
+    vec2<f32>(0.34495938, 0.29387760),
+    vec2<f32>(-0.91588581, 0.45771432),
+    vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543, 0.27676845),
+    vec2<f32>(0.97484398, 0.75648379),
+    vec2<f32>(0.44323325, -0.97511554),
+    vec2<f32>(0.53742981, -0.47373420),
+    vec2<f32>(-0.26496911, -0.41893023),
+    vec2<f32>(0.79197514, 0.19090188),
+    vec2<f32>(-0.24188840, 0.99706507),
+    vec2<f32>(-0.81409955, 0.91437590),
+    vec2<f32>(0.19984126, 0.78641367),
+    vec2<f32>(0.14383161, -0.14100790),
+    // vec2<f32>(-0.62120641, -0.12933457), // Original had 18, but array size is 16. Removing last two.
+    // vec2<f32>(0.65825488, 0.53754854)
+);
+
+// 阴影采样 (Poisson Disk PCF)
 fn fetch_shadow(shadow_pos: vec3<f32>, bias: f32) -> f32 {
     var visibility = 0.0;
     let size = 1.0 / 2048.0; // 同步初始化时的分辨率
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let offset = vec2<f32>(f32(x) * size, f32(y) * size);
-            visibility += textureSampleCompare(t_shadow, s_shadow, shadow_pos.xy + offset, shadow_pos.z - bias);
-        }
+    let filter_radius = 2.0;
+
+    var poisson = POISSON_DISK;
+    for (var i = 0; i < 16; i++) {
+        let offset = poisson[i] * size * filter_radius;
+        visibility += textureSampleCompare(t_shadow, s_shadow, shadow_pos.xy + offset, shadow_pos.z - bias);
     }
     
-    let result = visibility / 9.0;
+    let result = visibility / 16.0;
     let in_bounds = shadow_pos.x >= 0.0 && shadow_pos.x <= 1.0 && shadow_pos.y >= 0.0 && shadow_pos.y <= 1.0;
     return select(1.0, result, in_bounds);
+}
+
+// 点光源阴影采样 (全向)
+fn fetch_point_shadow(light_pos: vec3<f32>, world_pos: vec3<f32>, range: f32, bias: f32) -> f32 {
+    let light_to_frag = world_pos - light_pos;
+    let distance = length(light_to_frag);
+    
+    // 归一化深度
+    let depth = distance / range;
+    
+    // 采样 CubeMap
+    let sampled_depth = textureSample(t_shadow_cube, s_common, normalize(light_to_frag));
+    
+    return select(0.0, 1.0, sampled_depth >= depth - bias);
 }
 
 @fragment
@@ -169,13 +240,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = tex_color.rgb * material.base_color.rgb;
     
     // 获取法线
-    var N = normalize(in.world_normal);
+    var N = normalize(in.normal);
     if (material.has_normal_map > 0u) {
         let tangent_normal = textureSample(t_normal, s_common, in.uv).rgb * 2.0 - 1.0;
         
-        let T = normalize(in.world_tangent.xyz);
-        let B = normalize(cross(N, T) * in.world_tangent.w);
-        let TBN = mat3x3<f32>(T, B, N);
+        let TBN = mat3x3<f32>(in.tangent, in.bitangent, in.normal);
         N = normalize(TBN * tangent_normal);
     }
     
@@ -197,12 +266,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var Lo = vec3<f32>(0.0);
 
-    // 1. 处理平行光
+    // 1. 平行光计算 (阴影 + BRDF)
     if (light_buffer.dir_light.intensity > 0.0) {
         let L = normalize(-light_buffer.dir_light.direction);
         let H = normalize(V + L);
+        
+        // 级联选择
+        var shadow_pos_selected = in.shadow_pos0;
+        if (in.view_z > light_space.split_distances.x) {
+            shadow_pos_selected = in.shadow_pos1;
+        }
+        if (in.view_z > light_space.split_distances.y) {
+            shadow_pos_selected = in.shadow_pos2;
+        }
+        if (in.view_z > light_space.split_distances.z) {
+            shadow_pos_selected = in.shadow_pos3;
+        }
+
+        let shadow = fetch_shadow(shadow_pos_selected, light_buffer.dir_light.shadow_bias);
         let radiance = light_buffer.dir_light.color * light_buffer.dir_light.intensity;
-        let shadow = fetch_shadow(in.shadow_pos, light_buffer.dir_light.shadow_bias);
 
         let NDF = DistributionGGX(N, H, roughness);
         let G   = GeometrySmith(N, V, L, roughness);
@@ -220,18 +302,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         Lo += (kD * albedo / PI + specular) * radiance * NdotL * shadow;
     }
 
-    // 2. 遍历所有点光源
+    // 2. 遍历所有点光源和聚光灯
     for (var i: u32 = 0u; i < light_buffer.light_count; i = i + 1u) {
         let light = light_buffer.lights[i];
         
-        // 计算光照方向和距离衰减
-        let L = normalize(light.position - in.world_position);
+        let light_to_pos = light.position - in.world_position;
+        let L = normalize(light_to_pos);
         let H = normalize(V + L);
-        let distance = length(light.position - in.world_position);
+        let distance = length(light_to_pos);
         
+        if (distance > light.range && light.range > 0.0) {
+            continue;
+        }
+
         // 简单的距离平方反比衰减 + 范围截断
-        let attenuation = 1.0 / (distance * distance);
+        var attenuation = 1.0 / (distance * distance + 1.0);
+        
+        // 聚光灯锥形衰减
+        if (light.light_type == 1u) {
+            let theta = dot(L, normalize(-light.direction));
+            let epsilon = light.inner_angle - light.outer_angle;
+            let intensity_factor = clamp((theta - light.outer_angle) / epsilon, 0.0, 1.0);
+            attenuation = attenuation * intensity_factor;
+        }
+
         let radiance = light.color * light.intensity * attenuation;
+
+        var shadow = 1.0;
+        if (light.light_type == 0u) {
+            // 目前只支持第一个点光源的阴影作为演示
+            if (i == 0u) {
+                shadow = fetch_point_shadow(light.position, in.world_position, light.range, light.shadow_bias);
+            }
+        }
 
         // Cook-Torrance BRDF
         let NDF = DistributionGGX(N, H, roughness);   
@@ -239,10 +342,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let F   = fresnelSchlick(max(dot(H, V), 0.0), F0);           
         
         let numerator    = NDF * G * F; 
-        let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001; // 防止除以0
+        let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
         let specular = numerator / denominator;
         
-        // kS 是镜面反射部分，kD 是漫反射部分
         let kS = F;
         var kD = vec3<f32>(1.0) - kS;
         kD = kD * (1.0 - metallic);	  
@@ -250,7 +352,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let NdotL = max(dot(N, L), 0.0);        
 
         Lo = Lo + (kD * albedo / PI + specular) * radiance * NdotL;
-    }   
+    }
     
     // 环境光部分 - IBL
     let irradiance = textureSample(t_irradiance, s_ibl, N).rgb;
