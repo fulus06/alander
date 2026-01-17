@@ -889,7 +889,10 @@ fn update_animations(scene: &mut Scene, dt: f32) {
         for (root_entity, mut player) in query.iter_mut(&mut scene.world) {
             if !player.is_playing { continue; }
 
+            let mut sync_clips = Vec::new(); // (clip_idx, time, weight)
+
             if let Some(active_idx) = player.active_clip_index {
+                // 更新主剪辑时间
                 if let Some(clip) = player.clips.get(active_idx) {
                     let duration = clip.duration;
                     let playback_speed = player.playback_speed;
@@ -906,25 +909,77 @@ fn update_animations(scene: &mut Scene, dt: f32) {
 
                     player.current_time = new_time;
                     player.is_playing = is_playing;
+
+                    // 处理过渡百分比
+                    if let Some(target_idx) = player.transition_target_index {
+                        player.transition_time += dt;
+                        let alpha = (player.transition_time / player.transition_duration).clamp(0.0, 1.0);
+                        
+                        sync_clips.push((active_idx, player.current_time, 1.0 - alpha));
+                        sync_clips.push((target_idx, player.transition_time, alpha)); // 假设目标剪辑从 0 开始随过渡时间推进
+
+                        if player.transition_time >= player.transition_duration {
+                            // 过渡完成
+                            player.active_clip_index = Some(target_idx);
+                            player.current_time = player.transition_time; // 保持一致
+                            player.transition_target_index = None;
+                            player.transition_time = 0.0;
+                        }
+                    } else {
+                        sync_clips.push((active_idx, player.current_time, 1.0));
+                    }
+                }
+            }
+
+            // 执行混合采样
+            if !sync_clips.is_empty() {
+                // 收集所有涉及的通道名称
+                let mut channel_names = std::collections::HashSet::new();
+                for &(idx, _, _) in &sync_clips {
+                    if let Some(clip) = player.clips.get(idx) {
+                        for channel in &clip.channels {
+                            channel_names.insert(channel.target_name.clone());
+                        }
+                    }
                 }
 
-                // 重新借用进行采样
-                if let Some(clip) = player.clips.get(active_idx) {
-                    let t = player.current_time;
-                    for channel in &clip.channels {
-                        let pos = channel.position_track.as_ref().and_then(|tr| tr.sample_vec3(t));
-                        let rot = channel.rotation_track.as_ref().and_then(|tr| tr.sample_quat(t));
-                        let sca = channel.scale_track.as_ref().and_then(|tr| tr.sample_vec3(t));
-                        
-                        animation_updates.push((root_entity, channel.target_name.clone(), pos, rot, sca));
+                for target_name in channel_names {
+                    let mut blended_pos: Option<glam::Vec3> = None;
+                    let mut blended_rot: Option<glam::Quat> = None;
+                    let mut blended_sca: Option<glam::Vec3> = None;
+                    
+                    let mut total_weight = 0.0;
+                    for &(idx, t, weight) in &sync_clips {
+                        if let Some(clip) = player.clips.get(idx) {
+                            if let Some(channel) = clip.channels.iter().find(|c| c.target_name == target_name) {
+                                if let Some(p) = channel.position_track.as_ref().and_then(|tr| tr.sample_vec3(t)) {
+                                    blended_pos = Some(blended_pos.map_or(p * weight, |acc| acc + p * weight));
+                                }
+                                if let Some(r) = channel.rotation_track.as_ref().and_then(|tr| tr.sample_quat(t)) {
+                                    blended_rot = Some(match blended_rot {
+                                        None => r,
+                                        Some(acc) => {
+                                            let alpha = weight / (total_weight + weight);
+                                            acc.slerp(r, alpha)
+                                        }
+                                    });
+                                }
+                                if let Some(s) = channel.scale_track.as_ref().and_then(|tr| tr.sample_vec3(t)) {
+                                    blended_sca = Some(blended_sca.map_or(s * weight, |acc| acc + s * weight));
+                                }
+                                total_weight += weight;
+                            }
+                        }
                     }
+                    animation_updates.push((root_entity, target_name.clone(), blended_pos, blended_rot, blended_sca));
                 }
             }
         }
     }
 
     // 2. 应用到子实体
-    for (root, target_name, pos, rot, sca) in animation_updates {
+    for update in animation_updates {
+        let (root, target_name, pos, rot, sca) = update;
         if let Some(target_entity) = find_entity_by_name_recursive(&scene.world, root, &target_name) {
             if let Some(mut transform) = scene.world.get_mut::<Transform>(target_entity) {
                 if let Some(p) = pos { transform.position = p; }

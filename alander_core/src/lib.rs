@@ -690,6 +690,11 @@ pub mod scene {
         pub playback_speed: f32,
         pub is_playing: bool,
         pub loop_enabled: bool,
+
+        /// 动画混合/过渡相关
+        pub transition_target_index: Option<usize>,
+        pub transition_time: f32,
+        pub transition_duration: f32,
     }
 
     impl Default for AnimationPlayer {
@@ -701,17 +706,31 @@ pub mod scene {
                 playback_speed: 1.0,
                 is_playing: true,
                 loop_enabled: true,
+                transition_target_index: None,
+                transition_time: 0.0,
+                transition_duration: 0.0,
             }
         }
     }
 
     impl AnimationPlayer {
-        /// 播放指定索引的剪辑
+        /// 播放指定索引的剪辑（直接切换）
         pub fn play(&mut self, index: usize) {
             if index < self.clips.len() {
                 self.active_clip_index = Some(index);
                 self.current_time = 0.0;
                 self.is_playing = true;
+                // 取消任何正在进行的过渡
+                self.transition_target_index = None;
+            }
+        }
+
+        /// 交叉淡入淡出到指定剪辑
+        pub fn cross_fade(&mut self, index: usize, duration: f32) {
+            if index < self.clips.len() && Some(index) != self.active_clip_index {
+                self.transition_target_index = Some(index);
+                self.transition_time = 0.0;
+                self.transition_duration = duration;
             }
         }
     }

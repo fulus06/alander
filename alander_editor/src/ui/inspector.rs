@@ -309,11 +309,25 @@ pub fn show_inspector(
                             player.clips[i].name = name;
                         }
                         if ui.button("选择").clicked() {
-                            player.active_clip_index = Some(i);
+                            player.play(i);
+                        }
+                        if ui.button("🎬 混合").clicked() {
+                            player.cross_fade(i, 1.0); // 默认 1 秒过渡
                         }
                     });
                     ui.label(format!("时长: {:.2}s", duration));
                 });
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("过渡时长");
+                ui.add(egui::DragValue::new(&mut player.transition_duration).speed(0.1).clamp_range(0.0..=10.0));
+            });
+            if let Some(target) = player.transition_target_index {
+                let progress = if player.transition_duration > 0.0 { player.transition_time / player.transition_duration } else { 1.0 };
+                ui.label(format!("正在过渡到: {} ({:.1}%)", player.clips[target].name, progress * 100.0));
+                ui.add(egui::ProgressBar::new(progress));
             }
 
             if let Some(clip_idx) = player.active_clip_index {
