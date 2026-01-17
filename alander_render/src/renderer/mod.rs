@@ -1169,6 +1169,8 @@ impl Renderer {
                     normal: v.normal.into(),
                     uv: v.uv.into(),
                     tangent: v.tangent.into(),
+                    joint_indices: v.joint_indices,
+                    joint_weights: v.joint_weights,
                 }).collect::<Vec<_>>(),
                 &gltf_mesh.data.indices,
                 self.pipelines.mesh.model_bind_group_layout(),
@@ -1180,6 +1182,7 @@ impl Renderer {
                 gltf_mesh.transform,
                 material_buffer,
                 &self.resources.samplers.linear_clamp,
+                gltf_mesh.skin_index.is_some(),
             );
 
             let id = uuid::Uuid::new_v4();
@@ -1199,6 +1202,16 @@ impl Renderer {
     /// 添加场景对象
     pub fn add_object(&mut self, id: uuid::Uuid, object: SceneObject) {
         self.resources.add_object(id, object);
+    }
+
+    /// 获取场景对象
+    pub fn get_object(&self, id: uuid::Uuid) -> Option<&SceneObject> {
+        self.resources.objects.get(&id)
+    }
+
+    /// 获取场景对象 (可变)
+    pub fn get_object_mut(&mut self, id: uuid::Uuid) -> Option<&mut SceneObject> {
+        self.resources.objects.get_mut(&id)
     }
 
     /// 移除场景对象
@@ -1234,7 +1247,7 @@ impl Renderer {
         material: Option<crate::pipelines::MaterialBuffer>,
     ) {
         if let Some(object) = self.resources.objects.get_mut(object_id) {
-            object.update_model(self.ctx.queue(), model);
+            object.update_model(self.ctx.queue(), model, object.bone_buffer.is_some());
             if let Some(mat) = material {
                 self.ctx.queue().write_buffer(&object.material_buffer, 0, bytemuck::bytes_of(&mat));
             }
@@ -1425,24 +1438,32 @@ pub fn create_cube(
             normal: [0.0, 0.0, 1.0],
             uv: [0.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, -0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [-0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [0.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         // 后面
         Vertex {
@@ -1450,24 +1471,32 @@ pub fn create_cube(
             normal: [0.0, 0.0, -1.0],
             uv: [0.0, 0.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, -0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [1.0, 0.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, 0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [1.0, 1.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [-0.5, 0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [0.0, 1.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         // 左面
         Vertex {
@@ -1475,24 +1504,32 @@ pub fn create_cube(
             normal: [-1.0, 0.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [-0.5, -0.5, 0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [-0.5, 0.5, 0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [-0.5, 0.5, -0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         // 右面
         Vertex {
@@ -1500,24 +1537,32 @@ pub fn create_cube(
             normal: [1.0, 0.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, -0.5, -0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, 0.5, -0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, 0.5, 0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         // 上面
         Vertex {
@@ -1525,24 +1570,32 @@ pub fn create_cube(
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, 0.5, 0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, 0.5, -0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [-0.5, 0.5, -0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         // 下面
         Vertex {
@@ -1550,24 +1603,32 @@ pub fn create_cube(
             normal: [0.0, -1.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, -0.5, -0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [0.5, -0.5, 0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
         Vertex {
             position: [-0.5, -0.5, 0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            joint_indices: [0; 4],
+            joint_weights: [0.0; 4],
         },
     ];
 
@@ -1595,6 +1656,7 @@ pub fn create_cube(
         glam::Mat4::IDENTITY,
         crate::pipelines::MaterialBuffer::default(),
         sampler,
+        false,
     )
 }
 

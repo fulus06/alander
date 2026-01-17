@@ -71,8 +71,16 @@ var<uniform> light_space: LightSpace;
 @group(0) @binding(8)
 var t_shadow_cube: texture_depth_cube;
 
+struct Model {
+    matrix: mat4x4<f32>,
+    has_skinning: u32,
+};
+
 @group(1) @binding(0)
-var<uniform> model: mat4x4<f32>;
+var<uniform> model: Model;
+
+@group(1) @binding(1)
+var<uniform> bones: array<mat4x4<f32>, 128>;
 
 @group(2) @binding(0)
 var t_diffuse: texture_2d<f32>;
@@ -103,17 +111,39 @@ fn vs_main(
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) joint_indices: vec4<u32>,
+    @location(5) joint_weights: vec4<f32>,
 ) -> VertexOutput {
     var out: VertexOutput;
 
-    let world_pos = model * vec4<f32>(position, 1.0);
+    var skin_matrix = mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, 0.0, 1.0)
+    );
+
+    if (model.has_skinning > 0u) {
+        skin_matrix = 
+            bones[joint_indices.x] * joint_weights.x +
+            bones[joint_indices.y] * joint_weights.y +
+            bones[joint_indices.z] * joint_weights.z +
+            bones[joint_indices.w] * joint_weights.w;
+    }
+
+    let world_pos = model.matrix * skin_matrix * vec4<f32>(position, 1.0);
     out.world_position = world_pos.xyz;
     out.clip_position = camera.view_proj * world_pos;
     out.uv = uv;
 
     // TBN
-    let N_world = normalize((model * vec4<f32>(normal, 0.0)).xyz);
-    let T_world = normalize((model * vec4<f32>(tangent.xyz, 0.0)).xyz);
+    let normal_matrix = mat3x3<f32>(
+        (model.matrix * skin_matrix)[0].xyz,
+        (model.matrix * skin_matrix)[1].xyz,
+        (model.matrix * skin_matrix)[2].xyz
+    );
+    let N_world = normalize(normal_matrix * normal);
+    let T_world = normalize(normal_matrix * tangent.xyz);
     let B_world = normalize(cross(N_world, T_world) * tangent.w);
     out.normal = N_world;
     out.tangent = T_world;

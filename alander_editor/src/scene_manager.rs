@@ -2,7 +2,7 @@
 //!
 //! 此模块负责管理ECS世界、场景和实体。
 
-use alander_core::scene::{Transform, Mesh, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath, EntityUuid, Parent, Children, GlobalTransform, Camera, Material};
+use alander_core::scene::{Transform, Mesh, Name, RenderId, BoundingBox, PBRMaterial, PointLight, RigidBody, Collider, RigidBodyType, AssetPath, EntityUuid, Parent, Children, GlobalTransform, Camera, Material, Skin, Joint, AnimationPlayer};
 use serde::{Serialize, Deserialize};
 use alander_core::math::AABB;
 use alander_render::renderer::{Renderer, create_cube};
@@ -212,11 +212,138 @@ impl Scene {
         } else {
             self.world.entity_mut(entity).insert(GlobalTransform(global_matrix));
         }
+        
         let children = self.world.get::<Children>(entity).map(|c| c.0.clone());
         if let Some(child_list) = children {
             for child in child_list {
                 self.update_node_transform(child, global_matrix);
             }
+        }
+    }
+
+    /// 从 glTF 模型生成实体层级
+    pub fn spawn_gltf_model(&mut self, model: alander_core::assets::GltfModel, renderer: &mut Renderer, asset_path: &str) -> Entity {
+        // 创建模型根节点
+        let root_name = model.animations.first().map(|a| a.name.clone()).unwrap_or_else(|| "GltfModel".to_string());
+        let root = self.world.spawn((
+            Name(root_name),
+            Transform::default(),
+            GlobalTransform::default(),
+        )).id();
+
+        let mut node_to_entity = HashMap::new();
+        
+        // 递归创建所有节点
+        for &root_idx in &model.root_nodes {
+            self.spawn_gltf_node(root_idx, root, &model, renderer, &mut node_to_entity, asset_path);
+        }
+
+        // 处理蒙皮 (Skin)
+        for (node_idx, node_data) in model.nodes.iter().enumerate() {
+            if let Some(skin_idx) = node_data.skin_index {
+                if let (Some(&entity), Some(skin_data)) = (node_to_entity.get(&node_idx), model.skins.get(skin_idx)) {
+                    let mut joint_entities = Vec::new();
+                    for (i, &joint_node_idx) in skin_data.joints.iter().enumerate() {
+                        if let Some(&joint_entity) = node_to_entity.get(&joint_node_idx) {
+                            joint_entities.push(joint_entity);
+                            self.world.entity_mut(joint_entity).insert(Joint { index: i });
+                        }
+                    }
+
+                    self.world.entity_mut(entity).insert(Skin {
+                        name: skin_data.name.clone(),
+                        inverse_bind_matrices: skin_data.inverse_bind_matrices.clone(),
+                        joints: joint_entities,
+                    });
+                }
+            }
+        }
+
+        // 最后添加动画播放器
+        self.world.entity_mut(root).insert(AnimationPlayer {
+            clips: model.animations,
+            ..Default::default()
+        });
+
+        self.update_hierarchy();
+        root
+    }
+
+    fn spawn_gltf_node(
+        &mut self,
+        node_idx: usize,
+        parent_entity: Entity,
+        model: &alander_core::assets::GltfModel,
+        renderer: &mut Renderer,
+        node_to_entity: &mut HashMap<usize, Entity>,
+        asset_path: &str,
+    ) {
+        let node_data = &model.nodes[node_idx];
+        let mut builder = self.world.spawn_empty();
+        builder.insert(Name(node_data.name.clone()));
+        builder.insert(node_data.local_transform.clone());
+        builder.insert(GlobalTransform::default());
+        builder.insert(Parent(parent_entity));
+
+        // 如果节点有网格，我们需要将 renderer 中的 SceneObject 关联起来
+        // 在目前的简单实现中，我们可以重新为每个节点创建 SceneObject，
+        // 或者从 model.meshes 中查找。
+        if !node_data.mesh_indices.is_empty() {
+            // 注意：这里为了简化，我们只取第一个 primitive。
+            // 严谨的做法是为每个 primitive 创建一个子实体或特殊的组件。
+            if let Some(&mesh_idx) = node_data.mesh_indices.first() {
+                let gltf_mesh = &model.meshes[mesh_idx];
+                
+                // 由于 renderer.add_gltf_model 已经处理了纹理和 SceneObject 的创建，
+                // 但它是扁平化的。我们需要一种方式来获取刚才创建的 RenderId。
+                // 暂时简单的方案：在这里直接创建 SceneObject (类似 add_gltf_model)
+                let image_to_texture = HashMap::new(); // 简化处理
+                let diffuse_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, &image_to_texture, 0);
+                let normal_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, &image_to_texture, 1);
+                let mr_texture = renderer.resources.get_texture_from_index(model, gltf_mesh, &image_to_texture, 2);
+
+                let mut material_buffer = MaterialBuffer::default();
+                if normal_texture as *const _ != renderer.default_texture() as *const _ { material_buffer.has_normal_texture = 1; }
+                if mr_texture as *const _ != renderer.default_texture() as *const _ { material_buffer.has_metallic_roughness_texture = 1; }
+
+                let render_vertices: Vec<Vertex> = gltf_mesh.data.vertices.iter().map(|v| {
+                    Vertex {
+                        position: v.position.to_array(),
+                        normal: v.normal.to_array(),
+                        uv: v.uv.to_array(),
+                        tangent: v.tangent.to_array(),
+                        joint_indices: v.joint_indices,
+                        joint_weights: v.joint_weights,
+                    }
+                }).collect();
+
+                let scene_object = SceneObject::new(
+                    renderer.device(), &render_vertices, &gltf_mesh.data.indices,
+                    &renderer.pipelines().mesh.model_bind_group_layout, &renderer.pipelines().mesh.texture_bind_group_layout,
+                    &renderer.pipelines().mesh.material_bind_group_layout,
+                    diffuse_texture, normal_texture, mr_texture, glam::Mat4::IDENTITY, material_buffer, &renderer.resources.samplers.linear_clamp,
+                    gltf_mesh.skin_index.is_some(),
+                );
+                
+                let render_uuid = uuid::Uuid::new_v4();
+                renderer.add_object(render_uuid, scene_object);
+                builder.insert(RenderId(render_uuid));
+                builder.insert(AssetPath { path: asset_path.to_string(), sub_asset: Some(node_data.name.clone()) });
+            }
+        }
+
+        let entity = builder.id();
+        node_to_entity.insert(node_idx, entity);
+
+        // 手动维护 Children 组件
+        if let Some(mut children) = self.world.get_mut::<Children>(parent_entity) {
+            children.0.push(entity);
+        } else {
+            self.world.entity_mut(parent_entity).insert(Children(vec![entity]));
+        }
+
+        for &child_idx in &node_data.children {
+            self.spawn_gltf_node(child_idx, entity, model, renderer, node_to_entity, asset_path);
         }
     }
 
@@ -228,10 +355,12 @@ impl Scene {
                 let mesh_data_clone = mesh_data.clone();
                 let render_vertices: Vec<Vertex> = mesh_data_clone.vertices.iter().map(|v| {
                     Vertex {
-                        position: v.position.to_array(),
-                        normal: v.normal.to_array(),
-                        uv: v.uv.to_array(),
-                        tangent: v.tangent.to_array(),
+                        position: v.position.into(),
+                        normal: v.normal.into(),
+                        uv: v.uv.into(),
+                        tangent: v.tangent.into(),
+                        joint_indices: [0; 4],
+                        joint_weights: [0.0; 4],
                     }
                 }).collect();
                 let scene_object = SceneObject::new(
@@ -247,6 +376,7 @@ impl Scene {
                     glam::Mat4::IDENTITY,
                     MaterialBuffer::default(),
                     &renderer.resources.samplers.linear_clamp,
+                    false, // Simple load doesn't support skinning yet
                 );
                 let render_uuid = uuid::Uuid::new_v4();
                 renderer.add_object(render_uuid, scene_object);
@@ -320,6 +450,7 @@ impl Scene {
         let mut uuid_to_entity = HashMap::new();
         let mut created_entities = Vec::new();
         let mut gltf_cache: HashMap<String, (alander_core::assets::GltfModel, HashMap<usize, usize>)> = HashMap::new();
+        let mut node_index_to_entity: HashMap<(String, usize), Entity> = HashMap::new();
 
         for data in &entities_data {
             let mut builder = self.world.spawn_empty();
@@ -349,13 +480,21 @@ impl Scene {
                             if normal_texture as *const _ != renderer.default_texture() as *const _ { material_buffer.has_normal_texture = 1; }
                             if mr_texture as *const _ != renderer.default_texture() as *const _ { material_buffer.has_metallic_roughness_texture = 1; }
                             let render_vertices: Vec<Vertex> = gltf_mesh.data.vertices.iter().map(|v| {
-                                Vertex { position: v.position.to_array(), normal: v.normal.to_array(), uv: v.uv.to_array(), tangent: v.tangent.to_array() }
+                                Vertex { 
+                                    position: v.position.to_array(), 
+                                    normal: v.normal.to_array(), 
+                                    uv: v.uv.to_array(), 
+                                    tangent: v.tangent.to_array(),
+                                    joint_indices: v.joint_indices,
+                                    joint_weights: v.joint_weights,
+                                }
                             }).collect();
                             let scene_object = SceneObject::new(
                                 renderer.device(), &render_vertices, &gltf_mesh.data.indices,
                                 &renderer.pipelines().mesh.model_bind_group_layout, &renderer.pipelines().mesh.texture_bind_group_layout,
                                 &renderer.pipelines().mesh.material_bind_group_layout,
                                 diffuse_texture, normal_texture, mr_texture, glam::Mat4::IDENTITY, material_buffer, &renderer.resources.samplers.linear_clamp,
+                                gltf_mesh.skin_index.is_some(),
                             );
                             let render_uuid = Uuid::new_v4();
                             renderer.add_object(render_uuid, scene_object);

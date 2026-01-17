@@ -697,6 +697,39 @@ impl AlanderApp {
         // 简单的演示：如果有第一个点光源，渲染其全向阴影
         // 实际开发中应该动态收集需要阴影的点光源
         if let Some(scene) = self.scene_manager.active_scene_mut() {
+            // 更新动画
+            update_animations(scene, self.displayed_delta_time);
+
+            // 5. 更新已有对象的变换和骨骼
+            let mut query = scene.world.query::<(Entity, &alander_core::scene::GlobalTransform, &alander_core::scene::RenderId, Option<&alander_core::scene::Skin>)>();
+            for (entity, gt, rid, skin) in query.iter(&scene.world) {
+                if let Some(obj) = self.renderer.get_object(rid.0) {
+                    let cgmath_matrix = cgmath::Matrix4::from(gt.0.to_cols_array_2d());
+                    obj.update_model(self.renderer.queue(), cgmath_matrix, skin.is_some());
+
+                    // 如果有蒙皮，更新骨骼矩阵
+                    if let Some(skin_comp) = skin {
+                        let mut bone_buffer = alander_render::pipelines::common::BoneBuffer {
+                            matrices: [[[0.0; 4]; 4]; 128],
+                        };
+                        
+                        let mesh_inv_world = gt.0.inverse();
+
+                        for (i, &joint_entity) in skin_comp.joints.iter().enumerate() {
+                            if i >= 128 { break; }
+                            
+                            if let Some(joint_gt) = scene.world.get::<alander_core::scene::GlobalTransform>(joint_entity) {
+                                // 计算骨骼空间变换: World(Joint) * InvBind(Joint) * InvWorld(Mesh)
+                                let ibm = skin_comp.inverse_bind_matrices[i];
+                                let joint_matrix = mesh_inv_world * joint_gt.0 * ibm;
+                                bone_buffer.matrices[i] = cgmath::Matrix4::from(joint_matrix.to_cols_array_2d()).into();
+                            }
+                        }
+                        obj.update_bones(self.renderer.queue(), &bone_buffer);
+                    }
+                }
+            }
+
             let mut point_light_query = scene.world.query::<(&alander_core::scene::GlobalTransform, &alander_core::scene::PointLight)>();
             if let Some((gt, light)) = point_light_query.iter(&scene.world).next() {
                 let pos = gt.0.transform_point3(glam::Vec3::ZERO);
@@ -776,23 +809,9 @@ impl AlanderApp {
             let loader = alander_core::assets::GltfLoader;
             match loader.load_scene(&path_str) {
                 Ok(model) => {
-                    let mesh_names: Vec<String> = model.meshes.iter().map(|m| m.data.name.clone()).collect();
-                    let mesh_transforms: Vec<Mat4> = model.meshes.iter().map(|m| m.transform).collect();
-                    let ids = self.renderer.add_gltf_model(model);
-                    
                     if let Some(scene) = self.scene_manager.active_scene_mut() {
-                        for (i, render_id) in ids.into_iter().enumerate() {
-                            let name = mesh_names.get(i).cloned().unwrap_or_else(|| format!("Mesh_{}", i));
-                            let transform_mat = mesh_transforms.get(i).cloned().unwrap_or(Mat4::IDENTITY);
-                            let (scale, rotation, translation) = transform_mat.to_scale_rotation_translation();
-                            
-                            scene.create_entity((
-                                Name(name.clone()),
-                                Transform { position: translation, rotation, scale },
-                                RenderId(render_id),
-                                AssetPath { path: path_str.to_string(), sub_asset: Some(name) },
-                            ));
-                        }
+                        let _root = scene.spawn_gltf_model(model, &mut self.renderer, &path_str);
+                        tracing::info!("导入 glTF 模型完成: {}", path_str);
                     }
                 }
                 Err(e) => tracing::error!("加载 glTF 失败: {}", e),
@@ -858,44 +877,79 @@ impl AlanderApp {
 }
 
 /// 更新所有识体的动画系统 (独立于 AlanderApp 以避免借用冲突)
-fn update_animations(scene: &mut Scene, delta_time: f32) {
-    use alander_core::scene::AnimationPlayer;
+fn update_animations(scene: &mut Scene, dt: f32) {
+    use alander_core::scene::{AnimationPlayer, Transform, Name, Children};
+    use bevy_ecs::prelude::*;
 
-    let mut query = scene.world.query::<(&mut AnimationPlayer, &mut Transform)>();
-    for (mut player, mut transform) in query.iter_mut(&mut scene.world) {
-        if !player.is_playing { continue; }
+    let mut animation_updates = Vec::new();
 
-        if let Some(active_idx) = player.active_clip_index {
-            // 首先计算时长信息，而不持有 clip 的长期引用
-            let duration = player.clips.get(active_idx).map(|c| c.duration).unwrap_or(0.0);
-            
-            // 更新时间并处理循环/停止
-            let mut new_time = player.current_time + delta_time * player.playback_speed;
-            if player.loop_enabled && duration > 0.0 {
-                new_time %= duration;
-            } else if new_time > duration {
-                new_time = duration;
-                player.is_playing = false;
+    // 1. 采样所有活跃的播放器
+    {
+        let mut query = scene.world.query::<(Entity, &mut AnimationPlayer)>();
+        for (root_entity, mut player) in query.iter_mut(&mut scene.world) {
+            if !player.is_playing { continue; }
+
+            if let Some(active_idx) = player.active_clip_index {
+                if let Some(clip) = player.clips.get(active_idx) {
+                    let duration = clip.duration;
+                    let playback_speed = player.playback_speed;
+                    let loop_enabled = player.loop_enabled;
+                    
+                    let mut new_time = player.current_time + dt * playback_speed;
+                    let mut is_playing = true;
+                    if loop_enabled && duration > 0.0 {
+                        new_time %= duration;
+                    } else if new_time > duration {
+                        new_time = duration;
+                        is_playing = false;
+                    }
+
+                    player.current_time = new_time;
+                    player.is_playing = is_playing;
+                }
+
+                // 重新借用进行采样
+                if let Some(clip) = player.clips.get(active_idx) {
+                    let t = player.current_time;
+                    for channel in &clip.channels {
+                        let pos = channel.position_track.as_ref().and_then(|tr| tr.sample_vec3(t));
+                        let rot = channel.rotation_track.as_ref().and_then(|tr| tr.sample_quat(t));
+                        let sca = channel.scale_track.as_ref().and_then(|tr| tr.sample_vec3(t));
+                        
+                        animation_updates.push((root_entity, channel.target_name.clone(), pos, rot, sca));
+                    }
+                }
             }
-            player.current_time = new_time;
+        }
+    }
 
-            // 再次借用 clip 进行采样
-            if let Some(clip) = player.clips.get(active_idx) {
-                let t = player.current_time;
-
-                if let Some(track) = &clip.position_track {
-                    if let Some(pos) = track.sample_vec3(t) { transform.position = pos; }
-                }
-                if let Some(track) = &clip.rotation_track {
-                    if let Some(rot) = track.sample_quat(t) { transform.rotation = rot; }
-                }
-                if let Some(track) = &clip.scale_track {
-                    if let Some(scale) = track.sample_vec3(t) { transform.scale = scale; }
-                }
+    // 2. 应用到子实体
+    for (root, target_name, pos, rot, sca) in animation_updates {
+        if let Some(target_entity) = find_entity_by_name_recursive(&scene.world, root, &target_name) {
+            if let Some(mut transform) = scene.world.get_mut::<Transform>(target_entity) {
+                if let Some(p) = pos { transform.position = p; }
+                if let Some(r) = rot { transform.rotation = r; }
+                if let Some(s) = sca { transform.scale = s; }
             }
         }
     }
 }
 
+fn find_entity_by_name_recursive(world: &World, entity: Entity, name: &str) -> Option<Entity> {
+    use alander_core::scene::{Name, Children};
+    if let Some(n) = world.get::<Name>(entity) {
+        if n.0 == name { return Some(entity); }
+    }
+    if let Some(children) = world.get::<Children>(entity) {
+        for &child in &children.0 {
+            if let Some(found) = find_entity_by_name_recursive(world, child, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 // 辅助类型
 type Vec2 = glam::Vec2;
+

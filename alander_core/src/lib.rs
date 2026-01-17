@@ -230,6 +230,8 @@ pub mod scene {
         pub normal: Vec3,
         pub uv: Vec2,
         pub tangent: Vec4, // 切线 (含副切线符号)
+        pub joint_indices: [u32; 4], // 骨骼索引
+        pub joint_weights: [f32; 4], // 骨骼权重
     }
 
     impl Vertex {
@@ -240,6 +242,8 @@ pub mod scene {
                 normal,
                 uv,
                 tangent: Vec4::new(1.0, 0.0, 0.0, 1.0), // 默认切线
+                joint_indices: [0; 4],
+                joint_weights: [0.0; 4],
             }
         }
 
@@ -250,6 +254,27 @@ pub mod scene {
                 normal,
                 uv,
                 tangent,
+                joint_indices: [0; 4],
+                joint_weights: [0.0; 4],
+            }
+        }
+
+        /// 创建带骨骼信息的顶点
+        pub fn with_skinning(
+            position: Vec3,
+            normal: Vec3,
+            uv: Vec2,
+            tangent: Vec4,
+            joint_indices: [u32; 4],
+            joint_weights: [f32; 4],
+        ) -> Self {
+            Self {
+                position,
+                normal,
+                uv,
+                tangent,
+                joint_indices,
+                joint_weights,
             }
         }
     }
@@ -402,6 +427,23 @@ pub mod scene {
                 shadow_bias: 0.005,
             }
         }
+    }
+
+    /// 蒙皮组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize)]
+    pub struct Skin {
+        pub name: String,
+        /// 逆绑定矩阵 (Inverse Bind Matrices)
+        pub inverse_bind_matrices: Vec<Mat4>,
+        /// 骨骼节点引用
+        pub joints: Vec<Entity>,
+    }
+
+    /// 骨骼关节组件
+    #[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct Joint {
+        /// 在 Skin.joints 中的索引
+        pub index: usize,
     }
 
     /// 刚体类型
@@ -595,14 +637,21 @@ pub mod scene {
         }
     }
 
-    /// 动画剪辑资源
+    /// 动画通道 (针对特定节点的轨道)
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AnimationChannel {
+        pub target_name: String,
+        pub position_track: Option<AnimationTrack<Vec3>>,
+        pub rotation_track: Option<AnimationTrack<Quat>>,
+        pub scale_track: Option<AnimationTrack<Vec3>>,
+    }
+
+    /// 动画剪辑资源 (含多个通道)
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct AnimationClip {
         pub name: String,
         pub duration: f32,
-        pub position_track: Option<AnimationTrack<Vec3>>,
-        pub rotation_track: Option<AnimationTrack<Quat>>,
-        pub scale_track: Option<AnimationTrack<Vec3>>,
+        pub channels: Vec<AnimationChannel>,
     }
 
     impl AnimationClip {
@@ -610,23 +659,23 @@ pub mod scene {
             Self {
                 name,
                 duration: 0.0,
-                position_track: None,
-                rotation_track: None,
-                scale_track: None,
+                channels: Vec::new(),
             }
         }
 
-        /// 更新时长 (基于所有轨道的最大时间点)
+        /// 更新时长 (基于所有通道中最长轨道)
         pub fn update_duration(&mut self) {
             let mut max_time = 0.0f32;
-            if let Some(track) = &self.position_track {
-                for kf in &track.keyframes { max_time = max_time.max(kf.time); }
-            }
-            if let Some(track) = &self.rotation_track {
-                for kf in &track.keyframes { max_time = max_time.max(kf.time); }
-            }
-            if let Some(track) = &self.scale_track {
-                for kf in &track.keyframes { max_time = max_time.max(kf.time); }
+            for channel in &self.channels {
+                if let Some(track) = &channel.position_track {
+                    for kf in &track.keyframes { max_time = max_time.max(kf.time); }
+                }
+                if let Some(track) = &channel.rotation_track {
+                    for kf in &track.keyframes { max_time = max_time.max(kf.time); }
+                }
+                if let Some(track) = &channel.scale_track {
+                    for kf in &track.keyframes { max_time = max_time.max(kf.time); }
+                }
             }
             self.duration = max_time;
         }

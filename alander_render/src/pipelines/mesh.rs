@@ -128,6 +128,16 @@ impl MeshPipeline {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -267,6 +277,7 @@ pub struct SceneObject {
     pub model_bind_group: wgpu::BindGroup,
     pub texture_bind_group: wgpu::BindGroup,
     pub material_bind_group: wgpu::BindGroup,
+    pub bone_buffer: Option<wgpu::Buffer>,
 }
 
 impl SceneObject {
@@ -283,6 +294,7 @@ impl SceneObject {
         matrix: glam::Mat4,
         material: MaterialBuffer,
         sampler: &wgpu::Sampler,
+        has_skinning: bool,
     ) -> Self {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("顶点缓冲区"),
@@ -298,19 +310,43 @@ impl SceneObject {
 
         let cgmath_matrix = cgmath::Matrix4::from(matrix.to_cols_array_2d());
 
+        let bone_buffer = if has_skinning {
+            Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("骨骼缓冲区"),
+                size: std::mem::size_of::<crate::pipelines::common::BoneBuffer>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }))
+        } else {
+            // 创建一个默认的骨骼缓冲区以满足绑定需求
+            Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("默认骨骼缓冲区"),
+                contents: bytemuck::bytes_of(&crate::pipelines::common::BoneBuffer {
+                    matrices: [[[0.0; 4]; 4]; 128],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            }))
+        };
+
         let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("模型缓冲区"),
-            contents: bytemuck::bytes_of(&ModelBuffer::new(cgmath_matrix)),
+            contents: bytemuck::bytes_of(&ModelBuffer::with_skinning(cgmath_matrix, has_skinning)),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("模型绑定组"),
             layout: model_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: model_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: model_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bone_buffer.as_ref().unwrap().as_entire_binding(),
+                },
+            ],
         });
 
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -348,12 +384,19 @@ impl SceneObject {
             model_bind_group,
             texture_bind_group,
             material_bind_group,
+            bone_buffer: if has_skinning { bone_buffer } else { None },
         }
     }
 
-    pub fn update_model(&self, queue: &wgpu::Queue, model: cgmath::Matrix4<f32>) {
-        let model_buffer = ModelBuffer::new(model);
+    pub fn update_model(&self, queue: &wgpu::Queue, model: cgmath::Matrix4<f32>, has_skinning: bool) {
+        let model_buffer = ModelBuffer::with_skinning(model, has_skinning);
         queue.write_buffer(&self.model_buffer, 0, bytemuck::bytes_of(&model_buffer));
+    }
+
+    pub fn update_bones(&self, queue: &wgpu::Queue, bones: &crate::pipelines::common::BoneBuffer) {
+        if let Some(ref buffer) = self.bone_buffer {
+            queue.write_buffer(buffer, 0, bytemuck::bytes_of(bones));
+        }
     }
 
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {

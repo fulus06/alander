@@ -16,6 +16,8 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub tangent: [f32; 4],
+    pub joint_indices: [u32; 4],
+    pub joint_weights: [f32; 4],
 }
 
 impl Vertex {
@@ -24,26 +26,12 @@ impl Vertex {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
+                wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
+                wgpu::VertexAttribute { offset: 32, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
+                wgpu::VertexAttribute { offset: 48, shader_location: 4, format: wgpu::VertexFormat::Uint32x4 },
+                wgpu::VertexAttribute { offset: 64, shader_location: 5, format: wgpu::VertexFormat::Float32x4 },
             ],
         }
     }
@@ -234,14 +222,33 @@ impl Default for MaterialBuffer {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelBuffer {
     pub model: [[f32; 4]; 4],
+    pub has_skinning: u32,
+    pub _padding: [u32; 3],
 }
 
 impl ModelBuffer {
     pub fn new(model: cgmath::Matrix4<f32>) -> Self {
         Self {
             model: model.into(),
+            has_skinning: 0,
+            _padding: [0; 3],
         }
     }
+
+    pub fn with_skinning(model: cgmath::Matrix4<f32>, has_skinning: bool) -> Self {
+        Self {
+            model: model.into(),
+            has_skinning: if has_skinning { 1 } else { 0 },
+            _padding: [0; 3],
+        }
+    }
+}
+
+/// 骨骼矩阵 Buffer (最大支持 128 根骨骼)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BoneBuffer {
+    pub matrices: [[[f32; 4]; 4]; 128],
 }
 
 /// 光空间缓冲区 (用于阴影映射 - 支持 CSM)

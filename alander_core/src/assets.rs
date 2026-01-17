@@ -169,17 +169,40 @@ impl AssetLoader<crate::scene::MaterialData> for SimpleMaterialLoader {
 }
 
 /// glTF 模型数据
+/// glTF 节点数据 (用于重建层级结构)
+pub struct GltfNode {
+    pub name: String,
+    pub index: usize,
+    pub local_transform: super::scene::Transform,
+    pub mesh_indices: Vec<usize>, // 对应 model.meshes 中的索引 (一个节点可能有多个 primitive)
+    pub skin_index: Option<usize>,
+    pub children: Vec<usize>,
+}
+
+/// glTF 模型数据
 pub struct GltfModel {
+    pub nodes: Vec<GltfNode>,
     pub meshes: Vec<GltfMesh>,
     pub materials: Vec<MaterialData>,
     pub images: Vec<image::DynamicImage>,
+    pub skins: Vec<SkinData>,
+    pub animations: Vec<super::scene::AnimationClip>,
+    pub root_nodes: Vec<usize>,
+}
+
+/// glTF 蒙皮数据
+pub struct SkinData {
+    pub name: String,
+    pub inverse_bind_matrices: Vec<glam::Mat4>,
+    pub joints: Vec<usize>, // 对应 glTF node 索引
 }
 
 /// glTF 网格及其绑定的材质索引和变换
 pub struct GltfMesh {
     pub data: MeshData,
     pub material_index: Option<usize>,
-    pub transform: glam::Mat4,
+    pub transform: glam::Mat4, // 默认的世界变换 (回退用)
+    pub skin_index: Option<usize>,
 }
 
 /// glTF 资源加载器
@@ -192,42 +215,22 @@ impl GltfLoader {
         let (document, buffers, images) = gltf::import(path)
             .map_err(|e| AssetError::Parse(format!("glTF 导入失败: {}", e)))?;
 
-        tracing::info!("glTF 导入成功: {} 个网格, {} 个图像", document.meshes().count(), images.len());
-
         let mut converted_images = Vec::new();
-        for (i, image) in images.into_iter().enumerate() {
-            let width = image.width;
-            let height = image.height;
-            tracing::debug!("转换图像 {}: {}x{}, 格式: {:?}", i, width, height, image.format);
+        for image in images {
             let dynamic_image = match image.format {
-                gltf::image::Format::R8G8B8 => {
-                    let buffer = image::RgbImage::from_raw(width, height, image.pixels)
-                        .ok_or_else(|| AssetError::Parse(format!("图像 {} RGB 数据不匹配", i)))?;
-                    image::DynamicImage::ImageRgb8(buffer)
-                }
-                gltf::image::Format::R8G8B8A8 => {
-                    let buffer = image::RgbaImage::from_raw(width, height, image.pixels)
-                        .ok_or_else(|| AssetError::Parse(format!("图像 {} RGBA 数据不匹配", i)))?;
-                    image::DynamicImage::ImageRgba8(buffer)
-                }
-                _ => {
-                    tracing::warn!("不支持的图像 {} 格式: {:?}", i, image.format);
-                    return Err(AssetError::UnsupportedFormat(format!("不支持的图像格式: {:?}", image.format)));
-                }
+                gltf::image::Format::R8G8B8 => image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(image.width, image.height, image.pixels).unwrap()),
+                gltf::image::Format::R8G8B8A8 => image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(image.width, image.height, image.pixels).unwrap()),
+                _ => return Err(AssetError::UnsupportedFormat(format!("不支持的图像格式: {:?}", image.format))),
             };
             converted_images.push(dynamic_image);
         }
 
         let mut materials = Vec::new();
-        for (i, material) in document.materials().enumerate() {
+        for material in document.materials() {
             let pbr = material.pbr_metallic_roughness();
-            let base_color = pbr.base_color_factor();
-            
-            tracing::debug!("处理材质 {}: {}", i, material.name().unwrap_or("未命名"));
-
             materials.push(MaterialData {
-                name: material.name().unwrap_or(&format!("材质_{}", i)).to_string(),
-                base_color: base_color.into(),
+                name: material.name().unwrap_or(&format!("Material_{}", material.index().unwrap_or(0))).to_string(),
+                base_color: pbr.base_color_factor().into(),
                 metallic: pbr.metallic_factor(),
                 roughness: pbr.roughness_factor(),
                 base_color_texture: pbr.base_color_texture().map(|t| t.texture().source().index().to_string()),
@@ -236,137 +239,171 @@ impl GltfLoader {
             });
         }
 
-        let mut all_meshes = Vec::new();
-
-        // 3. 递归遍历节点并提取网格实例
-        for scene in document.scenes() {
-            for node in scene.nodes() {
-                Self::process_node_internal(&node, glam::Mat4::IDENTITY, &buffers, &mut all_meshes);
+        let mut all_skins = Vec::new();
+        for skin in document.skins() {
+            let reader = skin.reader(|buffer| Some(&buffers[buffer.index()]));
+            let mut ibms = Vec::new();
+            if let Some(ibm_iter) = reader.read_inverse_bind_matrices() {
+                for m in ibm_iter { ibms.push(glam::Mat4::from_cols_array_2d(&m)); }
             }
+            all_skins.push(SkinData {
+                name: skin.name().unwrap_or(&format!("Skin_{}", skin.index())).to_string(),
+                inverse_bind_matrices: ibms,
+                joints: skin.joints().map(|j| j.index()).collect(),
+            });
         }
 
-        // 如果场景中没有节点（或者没有引用网格），尝试直接加载所有定义的网格（回退方案）
-        if all_meshes.is_empty() {
-            tracing::info!("场景中未发现网格实例，尝试回退到加载网格定义");
-            for mesh in document.meshes() {
+        let mut all_meshes = Vec::new();
+        let mut node_to_mesh_indices = std::collections::HashMap::new();
+
+        // 1. 提取所有节点的网格数据
+        for node in document.nodes() {
+            if let Some(mesh) = node.mesh() {
+                let mut indices = Vec::new();
                 for primitive in mesh.primitives() {
                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-                    
                     if let Some(pos_iter) = reader.read_positions() {
                         let positions: Vec<[f32; 3]> = pos_iter.collect();
-                        let normals: Vec<[f32; 3]> = reader.read_normals()
-                            .map(|n| n.collect())
-                            .unwrap_or_else(|| vec![[0.0, 0.0, 0.0]; positions.len()]);
-                        let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0)
-                            .map(|uv| uv.into_f32().collect())
-                            .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-
-                        let tangents: Vec<[f32; 4]> = reader.read_tangents()
-                            .map(|t| t.collect())
-                            .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
+                        let normals: Vec<[f32; 3]> = reader.read_normals().map(|n| n.collect()).unwrap_or_else(|| vec![[0.0, 0.0, 0.0]; positions.len()]);
+                        let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0).map(|uv| uv.into_f32().collect()).unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+                        let tangents: Vec<[f32; 4]> = reader.read_tangents().map(|t| t.collect()).unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
+                        let joint_indices: Vec<[u32; 4]> = reader.read_joints(0).map(|j| j.into_u16().map(|v| v.map(|x| x as u32)).collect()).unwrap_or_else(|| vec![[0; 4]; positions.len()]);
+                        let joint_weights: Vec<[f32; 4]> = reader.read_weights(0).map(|w| w.into_f32().collect()).unwrap_or_else(|| vec![[0.0; 4]; positions.len()]);
 
                         let mut mesh_vertices = Vec::new();
                         for i in 0..positions.len() {
-                            mesh_vertices.push(Vertex::with_tangent(
-                                positions[i].into(),
-                                normals[i].into(),
-                                uvs[i].into(),
-                                tangents[i].into(),
+                            mesh_vertices.push(Vertex::with_skinning(
+                                positions[i].into(), normals[i].into(), uvs[i].into(), tangents[i].into(),
+                                joint_indices[i], joint_weights[i]
                             ));
                         }
 
-                        let mut mesh_indices = Vec::new();
-                        if let Some(indices) = reader.read_indices() {
-                            mesh_indices.extend(indices.into_u32());
-                        } else {
-                            for i in 0..positions.len() as u32 {
-                                mesh_indices.push(i);
-                            }
-                        }
+                        let mesh_indices = reader.read_indices().map(|indices| indices.into_u32().collect()).unwrap_or_else(|| (0..positions.len() as u32).collect());
 
                         all_meshes.push(GltfMesh {
-                            data: MeshData {
-                                name: mesh.name().unwrap_or("Unnamed Mesh").to_string(),
-                                vertices: mesh_vertices,
-                                indices: mesh_indices,
-                            },
+                            data: MeshData { name: mesh.name().unwrap_or("Mesh").to_string(), vertices: mesh_vertices, indices: mesh_indices },
                             material_index: primitive.material().index(),
-                            transform: glam::Mat4::IDENTITY,
+                            transform: glam::Mat4::IDENTITY, // 在层级结构中会重新应用
+                            skin_index: node.skin().map(|s| s.index()),
                         });
+                        indices.push(all_meshes.len() - 1);
                     }
                 }
+                node_to_mesh_indices.insert(node.index(), indices);
             }
         }
 
+        // 2. 提取层级信息
+        let mut all_nodes = Vec::new();
+        for node in document.nodes() {
+            let (translation, rotation, scale) = node.transform().decomposed();
+            all_nodes.push(GltfNode {
+                name: node.name().unwrap_or(&format!("Node_{}", node.index())).to_string(),
+                index: node.index(),
+                local_transform: super::scene::Transform {
+                    position: translation.into(),
+                    rotation: glam::Quat::from_array(rotation),
+                    scale: scale.into(),
+                },
+                mesh_indices: node_to_mesh_indices.get(&node.index()).cloned().unwrap_or_default(),
+                skin_index: node.skin().map(|s| s.index()),
+                children: node.children().map(|c| c.index()).collect(),
+            });
+        }
+
+        let mut root_nodes = Vec::new();
+        for scene in document.scenes() {
+            for node in scene.nodes() { root_nodes.push(node.index()); }
+        }
+
+        // 3. 提取动画
+        let mut all_animations = Vec::new();
+        for animation in document.animations() {
+            let mut clip = super::scene::AnimationClip::new(animation.name().unwrap_or(&format!("Animation_{}", animation.index())).to_string());
+            for channel in animation.channels() {
+                let target = channel.target();
+                let reader = channel.reader(|buffer| Some(&buffers[buffer.index()]));
+                let target_node = target.node();
+                let target_name = target_node.name().unwrap_or(&format!("Node_{}", target_node.index())).to_string();
+                
+                let mut channel_found = false;
+                for c in &mut clip.channels {
+                    if c.target_name == target_name {
+                        let input = reader.read_inputs().unwrap().collect::<Vec<_>>();
+                        let output = reader.read_outputs().unwrap();
+                        match output {
+                            gltf::animation::util::ReadOutputs::Translations(iter) => {
+                                let mut kfs = Vec::new();
+                                for (t, v) in input.iter().zip(iter) { kfs.push(super::scene::Keyframe { time: *t, value: v.into() }); }
+                                c.position_track = Some(super::scene::AnimationTrack::new(kfs));
+                            }
+                            gltf::animation::util::ReadOutputs::Rotations(iter) => {
+                                let mut kfs = Vec::new();
+                                for (t, v) in input.iter().zip(iter.into_f32()) { kfs.push(super::scene::Keyframe { time: *t, value: glam::Quat::from_array(v) }); }
+                                c.rotation_track = Some(super::scene::AnimationTrack::new(kfs));
+                            }
+                            gltf::animation::util::ReadOutputs::Scales(iter) => {
+                                let mut kfs = Vec::new();
+                                for (t, v) in input.iter().zip(iter) { kfs.push(super::scene::Keyframe { time: *t, value: v.into() }); }
+                                c.scale_track = Some(super::scene::AnimationTrack::new(kfs));
+                            }
+                            _ => {}
+                        }
+                        channel_found = true;
+                        break;
+                    }
+                }
+
+                if !channel_found {
+                    let mut anim_channel = super::scene::AnimationChannel {
+                        target_name: target_name.clone(),
+                        position_track: None, rotation_track: None, scale_track: None,
+                    };
+                    let input = reader.read_inputs().unwrap().collect::<Vec<_>>();
+                    let output = reader.read_outputs().unwrap();
+                    match output {
+                        gltf::animation::util::ReadOutputs::Translations(iter) => {
+                            let mut keyframes = Vec::new();
+                            for (t, v) in input.iter().zip(iter) {
+                                keyframes.push(super::scene::Keyframe { time: *t, value: v.into() });
+                            }
+                            anim_channel.position_track = Some(super::scene::AnimationTrack::new(keyframes));
+                        }
+                        gltf::animation::util::ReadOutputs::Rotations(iter) => {
+                            let mut keyframes = Vec::new();
+                            for (t, v) in input.iter().zip(iter.into_f32()) {
+                                keyframes.push(super::scene::Keyframe { time: *t, value: glam::Quat::from_array(v) });
+                            }
+                            anim_channel.rotation_track = Some(super::scene::AnimationTrack::new(keyframes));
+                        }
+                        gltf::animation::util::ReadOutputs::Scales(iter) => {
+                            let mut keyframes = Vec::new();
+                            for (t, v) in input.iter().zip(iter) {
+                                keyframes.push(super::scene::Keyframe { time: *t, value: v.into() });
+                            }
+                            anim_channel.scale_track = Some(super::scene::AnimationTrack::new(keyframes));
+                        }
+                        _ => {}
+                    }
+                    clip.channels.push(anim_channel);
+                }
+            }
+            clip.update_duration();
+            all_animations.push(clip);
+        }
+
         Ok(GltfModel {
+            nodes: all_nodes,
             meshes: all_meshes,
             materials,
             images: converted_images,
+            skins: all_skins,
+            animations: all_animations,
+            root_nodes,
         })
     }
 
 
-    fn process_node_internal(node: &gltf::Node, parent_transform: glam::Mat4, buffers: &[gltf::buffer::Data], meshes: &mut Vec<GltfMesh>) {
-        let (translation, rotation, scale) = node.transform().decomposed();
-        let local_transform = glam::Mat4::from_scale_rotation_translation(
-            glam::Vec3::from(scale),
-            glam::Quat::from_array(rotation),
-            glam::Vec3::from(translation),
-        );
-        let world_transform = parent_transform * local_transform;
-
-        if let Some(mesh) = node.mesh() {
-            for primitive in mesh.primitives() {
-                let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-                
-                if let Some(pos_iter) = reader.read_positions() {
-                    let positions: Vec<[f32; 3]> = pos_iter.collect();
-                    let normals: Vec<[f32; 3]> = reader.read_normals()
-                        .map(|n| n.collect())
-                        .unwrap_or_else(|| vec![[0.0, 0.0, 0.0]; positions.len()]);
-                    let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0)
-                        .map(|uv| uv.into_f32().collect())
-                        .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-                    let tangents: Vec<[f32; 4]> = reader.read_tangents()
-                        .map(|t| t.collect())
-                        .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; positions.len()]);
-
-                    let mut mesh_vertices = Vec::new();
-                    for i in 0..positions.len() {
-                        mesh_vertices.push(Vertex::with_tangent(
-                            positions[i].into(),
-                            normals[i].into(),
-                            uvs[i].into(),
-                            tangents[i].into(),
-                        ));
-                    }
-
-                    let mut mesh_indices = Vec::new();
-                    if let Some(indices) = reader.read_indices() {
-                        mesh_indices.extend(indices.into_u32());
-                    } else {
-                        for i in 0..positions.len() as u32 {
-                            mesh_indices.push(i);
-                        }
-                    }
-
-                    meshes.push(GltfMesh {
-                        data: MeshData {
-                            name: mesh.name().unwrap_or("Unnamed Mesh").to_string(),
-                            vertices: mesh_vertices,
-                            indices: mesh_indices,
-                        },
-                        material_index: primitive.material().index(),
-                        transform: world_transform,
-                    });
-                }
-            }
-        }
-
-        for child in node.children() {
-            Self::process_node_internal(&child, world_transform, buffers, meshes);
-        }
-    }
 }
 
 

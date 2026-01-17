@@ -290,6 +290,7 @@ pub fn show_inspector(
     // 8. 动画播放器 (AnimationPlayer) 编辑
     let current_transform = scene.world.get::<Transform>(entity).cloned();
     
+    let entity_name_comp = scene.world.get::<Name>(entity).map(|n| n.0.clone());
     if let Some(mut player) = scene.world.get_mut::<AnimationPlayer>(entity) {
         ui.collapsing("动画 (Animation)", |ui| {
             ui.horizontal(|ui| {
@@ -318,23 +319,39 @@ pub fn show_inspector(
             if let Some(clip_idx) = player.active_clip_index {
                 ui.separator();
                 ui.label("当前选中剪辑控制");
-                if let Some(transform) = current_transform {
+                if let (Some(transform), Some(target_name)) = (current_transform, entity_name_comp.as_ref()) {
                     if ui.button("捕捉当前 Transform 为关键帧").clicked() {
                         let time = player.current_time;
                         let clip = &mut player.clips[clip_idx];
                         
+                        let target_name = target_name.clone();
+                        let mut channel_idx = None;
+                        for (idx, c) in clip.channels.iter().enumerate() {
+                            if c.target_name == target_name { channel_idx = Some(idx); break; }
+                        }
+                        
+                        let channel_idx = channel_idx.unwrap_or_else(|| {
+                            clip.channels.push(alander_core::scene::AnimationChannel {
+                                target_name,
+                                position_track: None, rotation_track: None, scale_track: None,
+                            });
+                            clip.channels.len() - 1
+                        });
+                        
+                        let channel = &mut clip.channels[channel_idx];
+
                         // 捕捉位置
-                        let pos_track = clip.position_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
+                        let pos_track = channel.position_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
                         pos_track.keyframes.push(alander_core::scene::Keyframe { time, value: transform.position });
                         pos_track.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
                         
                         // 捕捉旋转
-                        let rot_track = clip.rotation_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
+                        let rot_track = channel.rotation_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
                         rot_track.keyframes.push(alander_core::scene::Keyframe { time, value: transform.rotation });
                         rot_track.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
 
                         // 捕捉缩放
-                        let sca_track = clip.scale_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
+                        let sca_track = channel.scale_track.get_or_insert(alander_core::scene::AnimationTrack::new(Vec::new()));
                         sca_track.keyframes.push(alander_core::scene::Keyframe { time, value: transform.scale });
                         sca_track.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
 
