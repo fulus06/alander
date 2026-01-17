@@ -8,6 +8,7 @@ pub mod skybox;
 pub mod debug;
 pub mod post_process;
 pub mod shadow;
+pub mod ssao;
 
 pub use common::*;
 pub use mesh::*;
@@ -15,6 +16,7 @@ pub use skybox::*;
 pub use debug::*;
 pub use post_process::*;
 pub use shadow::*;
+pub use ssao::*;
 
 /// 管线集合
 pub struct Pipelines {
@@ -30,6 +32,12 @@ pub struct Pipelines {
     pub bloom: BloomPipeline,
     /// 阴影管线
     pub shadow: ShadowPipeline,
+    /// 法线预传透
+    pub normal: NormalPipeline,
+    /// SSAO 计算
+    pub ssao: SSAOPipeline,
+    /// SSAO 模糊
+    pub ssao_blur: SSAOBlurPipeline,
 }
 
 impl Pipelines {
@@ -40,7 +48,10 @@ impl Pipelines {
         let post_process = PostProcessPipeline::new(device, sdr_format);
         let bloom = BloomPipeline::new(device, hdr_format);
         let shadow = ShadowPipeline::new(device);
+        let normal = NormalPipeline::new(device, &mesh.camera_bind_group_layout);
+        let ssao = SSAOPipeline::new(device);
+        let ssao_blur = SSAOBlurPipeline::new(device);
 
-        Self { mesh, skybox, debug, post_process, bloom, shadow }
+        Self { mesh, skybox, debug, post_process, bloom, shadow, normal, ssao, ssao_blur }
     }
 }

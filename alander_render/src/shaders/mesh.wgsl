@@ -70,6 +70,8 @@ var s_shadow: sampler_comparison;
 var<uniform> light_space: LightSpace;
 @group(0) @binding(8)
 var t_shadow_cube: texture_depth_cube;
+@group(0) @binding(9)
+var t_ssao: texture_2d<f32>;
 
 struct Model {
     matrix: mat4x4<f32>,
@@ -397,7 +399,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_ibl = prefilteredColor * (kS * 0.5 + 0.5); // 简化版菲涅尔反射
 
     // 即使没有 IBL 贴图，也保证一点基础环境光
-    let ambient = (diffuse_ibl + specular_ibl) + vec3<f32>(0.03) * albedo;
+    // SSAO 采样
+    let ssao = textureSample(t_ssao, s_common, in.uv).r;
+    let ambient = ((diffuse_ibl + specular_ibl) + vec3<f32>(0.03) * albedo) * ssao;
     
     var color = ambient + Lo + material.emissive.rgb;
 

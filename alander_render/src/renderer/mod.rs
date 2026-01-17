@@ -105,6 +105,23 @@ pub struct Renderer {
     shadow_cube_texture: wgpu::Texture,
     /// 点光源阴影立方体视图
     shadow_cube_view: wgpu::TextureView,
+    /// --- SSAO 相关 ---
+    /// 法线纹理视图
+    normal_view: wgpu::TextureView,
+    /// SSAO 结果纹理视图
+    ssao_view_result: wgpu::TextureView,
+    /// SSAO 模糊后的结果纹理视图
+    ssao_blurred_view: wgpu::TextureView,
+    /// SSAO 噪声纹理
+    ssao_noise_texture: wgpu::Texture,
+    /// SSAO 噪声纹理视图
+    ssao_noise_view: wgpu::TextureView,
+    /// SSAO 高级设置缓冲区
+    ssao_uniform_buffer: wgpu::Buffer,
+    /// SSAO 计算绑定组
+    ssao_bind_group: wgpu::BindGroup,
+    /// SSAO 模糊绑定组
+    ssao_blur_bind_group: wgpu::BindGroup,
 }
 
 #[repr(C)]
@@ -147,7 +164,9 @@ impl Renderer {
         };
 
         // 2. 创建资源管理器
-        let resources = ResourceManager::new(ctx.device(), ctx.queue());
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let resources = ResourceManager::new(device, queue);
 
         // 3. 继续初始化
         let depth_view =
@@ -269,9 +288,70 @@ impl Renderer {
         let skybox_texture = crate::texture::Texture::create_dummy_cubemap(ctx.device(), ctx.queue())
             .map_err(|_| RenderError::RequestDevice)?;
 
-        let camera_bind_group = ctx.device()
+        // SSAO 资源初始化
+        let normal_view = Self::create_color_texture(ctx.device(), ctx.config(), wgpu::TextureFormat::Rgba8Unorm, "法线纹理");
+        let ssao_view_result = Self::create_color_texture(ctx.device(), ctx.config(), wgpu::TextureFormat::R8Unorm, "SSAO 结果纹理");
+        let ssao_blurred_view = Self::create_color_texture(ctx.device(), ctx.config(), wgpu::TextureFormat::R8Unorm, "SSAO 模糊纹理");
+
+        let noise_data = crate::pipelines::ssao::generate_ssao_noise();
+        let ssao_noise_texture = ctx.device().create_texture_with_data(
+            ctx.queue(),
+            &wgpu::TextureDescriptor {
+                label: Some("SSAO 噪声纹理"),
+                size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            &noise_data,
+        );
+        let ssao_noise_view = ssao_noise_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let ssao_uniform = crate::pipelines::ssao::SSAOUniform {
+            samples: crate::pipelines::ssao::generate_ssao_kernel(),
+            projection: [ [0.0; 4]; 4 ], // 初始占位，将在 update_camera 中更新
+            inv_projection: [ [0.0; 4]; 4 ],
+            view: [ [0.0; 4]; 4 ],
+            radius: 0.5,
+            bias: 0.025,
+            screen_size: [ctx.config().width as f32, ctx.config().height as f32],
+            _padding: [0.0; 4],
+        };
+        let ssao_uniform_buffer = ctx.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("SSAO Uniform 缓冲区"),
+            contents: bytemuck::bytes_of(&ssao_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let ssao_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SSAO 计算绑定组"),
+            layout: &pipelines.ssao.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ssao_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&depth_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&normal_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&ssao_noise_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&resources.samplers.linear_clamp) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&resources.samplers.nearest_clamp) },
+            ],
+        });
+
+        let ssao_blur_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SSAO 模糊绑定组"),
+            layout: &pipelines.ssao_blur.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ssao_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&ssao_view_result) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&resources.samplers.linear_clamp) },
+            ],
+        });
+
+        let camera_bind_group = device
             .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("相机及 IBL 绑定组"),
+                label: Some("相机及 SSAO 绑定组"),
                 layout: &pipelines.mesh.camera_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -310,10 +390,14 @@ impl Renderer {
                         binding: 8,
                         resource: wgpu::BindingResource::TextureView(&shadow_cube_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(&ssao_blurred_view),
+                    },
                 ],
             });
 
-        let skybox_camera_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        let skybox_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("天空盒相机绑定组"),
             layout: &pipelines.skybox.camera_bind_group_layout,
             entries: &[
@@ -324,7 +408,7 @@ impl Renderer {
             ],
         });
 
-        let skybox_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        let skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("天空盒纹理绑定组"),
             layout: &pipelines.skybox.texture_bind_group_layout,
             entries: &[
@@ -344,15 +428,15 @@ impl Renderer {
             threshold: 1.0,
             intensity: 0.5,
         };
-        let bloom_settings_buffer = ctx.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let bloom_settings_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Bloom 设置缓冲区"),
             contents: bytemuck::cast_slice(&[bloom_settings]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let (bloom_textures, bloom_texture_views) = Self::create_bloom_textures(ctx.device(), ctx.config(), caps.preferred_hdr_format);
+        let (bloom_textures, bloom_texture_views) = Self::create_bloom_textures(device, ctx.config(), caps.preferred_hdr_format);
         
-        let bloom_extract_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        let bloom_extract_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Bloom 提取绑定组"),
             layout: &pipelines.bloom.bind_group_layout,
             entries: &[
@@ -363,7 +447,7 @@ impl Renderer {
         });
 
         let bloom_blur_bind_groups = [
-            ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Bloom 模糊绑定组 H"),
                 layout: &pipelines.bloom.bind_group_layout,
                 entries: &[
@@ -372,7 +456,7 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 2, resource: bloom_settings_buffer.as_entire_binding() },
                 ],
             }),
-            ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Bloom 模糊绑定组 V"),
                 layout: &pipelines.bloom.bind_group_layout,
                 entries: &[
@@ -384,7 +468,7 @@ impl Renderer {
         ];
 
         // 重新创建后期处理绑定组以包含 Bloom
-        let post_proc_bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        let post_proc_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("后期处理绑定组 (含 Bloom)"),
             layout: &pipelines.post_process.bind_group_layout,
             entries: &[
@@ -432,6 +516,14 @@ impl Renderer {
             csm_split_distances: vec![0.0; 4],
             shadow_cube_texture,
             shadow_cube_view,
+            normal_view,
+            ssao_view_result,
+            ssao_blurred_view,
+            ssao_noise_texture,
+            ssao_noise_view,
+            ssao_uniform_buffer,
+            ssao_bind_group,
+            ssao_blur_bind_group,
         })
     }
 
@@ -541,6 +633,86 @@ impl Renderer {
         }
     }
 
+    /// 法线预传透 Pass
+    pub fn render_normal_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        objects: &[&SceneObject],
+    ) {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("法线预传透 Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.normal_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.5, g: 0.5, b: 1.0, a: 1.0 }),
+                    store: true,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: true,
+                }),
+                stencil_ops: None,
+            }),
+        });
+
+        render_pass.set_pipeline(&self.pipelines.normal.pipeline);
+        render_pass.set_bind_group(0, &self.camera_bind_group, &[]); // 复用相机绑定组
+
+        for object in objects {
+            render_pass.set_vertex_buffer(0, object.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(object.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.set_bind_group(1, &object.model_bind_group, &[]);
+            render_pass.draw_indexed(0..object.num_elements, 0, 0..1);
+        }
+    }
+
+    /// SSAO 计算与模糊 Pass
+    pub fn render_ssao_pass(&self, encoder: &mut wgpu::CommandEncoder) {
+        // 1. 计算 SSAO
+        {
+            let mut ssao_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SSAO 计算 Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssao_view_result,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            ssao_pass.set_pipeline(&self.pipelines.ssao.pipeline);
+            ssao_pass.set_bind_group(0, &self.ssao_bind_group, &[]);
+            ssao_pass.draw(0..3, 0..1); // 全屏三角形
+        }
+
+        // 2. 模糊 SSAO
+        {
+            let mut blur_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SSAO 模糊 Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ssao_blurred_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            blur_pass.set_pipeline(&self.pipelines.ssao_blur.pipeline);
+            blur_pass.set_bind_group(0, &self.ssao_blur_bind_group, &[]);
+            blur_pass.draw(0..3, 0..1);
+        }
+    }
+
     /// 调整大小
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.ctx.resize(new_size);
@@ -600,6 +772,53 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: self.bloom_settings_buffer.as_entire_binding() },
             ],
         });
+
+        // 重新创建 SSAO 资源
+        self.normal_view = Self::create_color_texture(self.ctx.device(), self.ctx.config(), wgpu::TextureFormat::Rgba8Unorm, "法线纹理");
+        self.ssao_view_result = Self::create_color_texture(self.ctx.device(), self.ctx.config(), wgpu::TextureFormat::R8Unorm, "SSAO 结果纹理");
+        self.ssao_blurred_view = Self::create_color_texture(self.ctx.device(), self.ctx.config(), wgpu::TextureFormat::R8Unorm, "SSAO 模糊纹理");
+
+        // 刷新 SSAO 绑定组
+        self.ssao_bind_group = self.ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SSAO 计算绑定组"),
+            layout: &self.pipelines.ssao.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.ssao_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.depth_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.normal_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.ssao_noise_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.resources.samplers.linear_clamp) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.resources.samplers.nearest_clamp) },
+            ],
+        });
+
+        self.ssao_blur_bind_group = self.ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SSAO 模糊绑定组"),
+            layout: &self.pipelines.ssao_blur.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.ssao_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.ssao_view_result) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.resources.samplers.linear_clamp) },
+            ],
+        });
+
+        // 刷新模型管线的相机绑定组以包含新的 SSAO 视图
+        self.camera_bind_group = self.ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("相机及 SSAO 绑定组"),
+            layout: &self.pipelines.mesh.camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.camera_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.light_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.skybox_texture.view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.skybox_texture.view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.resources.samplers.linear_clamp) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.shadow_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 7, resource: self.light_space_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.shadow_cube_view) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.ssao_blurred_view) },
+            ],
+        });
     }
 
     /// 更新相机
@@ -620,6 +839,68 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&camera_buffer),
         );
+
+        // 更新 SSAO Uniform
+        let ssao_uniform = crate::pipelines::ssao::SSAOUniform {
+            samples: crate::pipelines::ssao::generate_ssao_kernel(),
+            projection: self.proj_matrix.into(),
+            inv_projection: self.proj_matrix.invert().unwrap_or(cgmath::Matrix4::identity()).into(),
+            view: self.view_matrix.into(),
+            radius: 0.5,
+            bias: 0.025,
+            screen_size: [self.ctx.config().width as f32, self.ctx.config().height as f32],
+            _padding: [0.0; 4],
+        };
+        self.ctx.queue().write_buffer(&self.ssao_uniform_buffer, 0, bytemuck::bytes_of(&ssao_uniform));
+
+        // 重新创建相机绑定组以确保使用最新的 IBL 贴图和其他资源
+        self.camera_bind_group = self.ctx.device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("相机及 SSAO 绑定组"),
+                layout: &self.pipelines.mesh.camera_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.light_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.skybox_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.skybox_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.resources.samplers.linear_clamp),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.light_space_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_cube_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(&self.ssao_blurred_view),
+                    },
+                ],
+            });
     }
 
     /// 将屏幕坐标转换为世界空间射线
@@ -924,6 +1205,13 @@ impl Renderer {
 
     /// 渲染场景
     pub fn render_scene(&self, target_view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
+        // 0. SSAO 阶段
+        {
+            let objects: Vec<&SceneObject> = self.resources.objects.values().collect();
+            self.render_normal_pass(encoder, &objects);
+            self.render_ssao_pass(encoder);
+        }
+
         // 1. 主场景 HDR 渲染阶段 (渲染到 hdr_view)
         {
             let mut ctx = RenderContext {
@@ -1339,6 +1627,32 @@ impl Renderer {
         let texture = device.create_texture(&desc);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         view
+    }
+    /// 创建单通道或多通道颜色纹理
+    fn create_color_texture(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        format: wgpu::TextureFormat,
+        label: &str,
+    ) -> wgpu::TextureView {
+        let size = wgpu::Extent3d {
+            width: config.width,
+            height: config.height,
+            depth_or_array_layers: 1,
+        };
+        let desc = wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
+
+        let texture = device.create_texture(&desc);
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
     /// 计算视图矩阵
