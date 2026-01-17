@@ -460,6 +460,7 @@ impl AlanderApp {
             }
 
             // 1.5 更新动画系统
+            update_animation_state_machine(scene, delta_time);
             update_animations(scene, delta_time);
 
             // 2. 将逻辑变更同步到物理世界并执行步进
@@ -877,6 +878,83 @@ impl AlanderApp {
 }
 
 /// 更新所有识体的动画系统 (独立于 AlanderApp 以避免借用冲突)
+fn update_animation_state_machine(scene: &mut Scene, _dt: f32) {
+    use alander_core::scene::{AnimationStateMachine, AnimationPlayer, AnimParamValue, AnimCondition};
+    use bevy_ecs::prelude::*;
+
+    let mut transitions_to_trigger = Vec::new();
+
+    {
+        let mut query = scene.world.query::<(Entity, &AnimationStateMachine, &AnimationPlayer)>();
+        for (entity, sm, _player) in query.iter(&scene.world) {
+            let current_state_name = sm.current_state.clone();
+            if let Some(state) = sm.states.get(&current_state_name) {
+                for transition in &state.transitions {
+                    let mut all_met = true;
+                    for condition in &transition.conditions {
+                        let met = match condition {
+                            AnimCondition::Greater(param, val) => {
+                                sm.parameters.get(param).map_or(false, |v| match v {
+                                    AnimParamValue::Float(f) => *f > *val,
+                                    _ => false,
+                                })
+                            }
+                            AnimCondition::Less(param, val) => {
+                                sm.parameters.get(param).map_or(false, |v| match v {
+                                    AnimParamValue::Float(f) => *f < *val,
+                                    _ => false,
+                                })
+                            }
+                            AnimCondition::Bool(param, val) => {
+                                sm.parameters.get(param).map_or(false, |v| match v {
+                                    AnimParamValue::Bool(b) => *b == *val,
+                                    _ => false,
+                                })
+                            }
+                            AnimCondition::Trigger(param) => {
+                                sm.parameters.get(param).map_or(false, |v| match v {
+                                    AnimParamValue::Trigger(t) => *t,
+                                    _ => false,
+                                })
+                            }
+                        };
+                        if !met {
+                            all_met = false;
+                            break;
+                        }
+                    }
+
+                    if all_met {
+                        if let Some(target_state) = sm.states.get(&transition.target_state) {
+                            let mut triggers_to_clear = Vec::new();
+                            for condition in &transition.conditions {
+                                if let AnimCondition::Trigger(param) = condition {
+                                    triggers_to_clear.push(param.clone());
+                                }
+                            }
+                            
+                            transitions_to_trigger.push((entity, target_state.clip_index, transition.duration, transition.target_state.clone(), triggers_to_clear));
+                            break; // 每次只触发一个转换
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (entity, clip_idx, duration, state_name, triggers) in transitions_to_trigger {
+        if let Some(mut player) = scene.world.get_mut::<AnimationPlayer>(entity) {
+            player.cross_fade(clip_idx, duration);
+        }
+        if let Some(mut sm) = scene.world.get_mut::<AnimationStateMachine>(entity) {
+            sm.current_state = state_name;
+            for param in triggers {
+                sm.parameters.insert(param, AnimParamValue::Trigger(false));
+            }
+        }
+    }
+}
+
 fn update_animations(scene: &mut Scene, dt: f32) {
     use alander_core::scene::{AnimationPlayer, Transform, Name, Children};
     use bevy_ecs::prelude::*;

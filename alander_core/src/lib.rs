@@ -734,6 +734,69 @@ pub mod scene {
             }
         }
     }
+
+    /// 动画参数类型
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum AnimParamValue {
+        Float(f32),
+        Bool(bool),
+        Trigger(bool), // 触发器：一旦满足就设为 false
+    }
+
+    /// 动画转换条件
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum AnimCondition {
+        Greater(String, f32),
+        Less(String, f32),
+        Bool(String, bool),
+        Trigger(String),
+    }
+
+    /// 动画转换
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AnimationTransition {
+        pub target_state: String,
+        pub conditions: Vec<AnimCondition>,
+        pub duration: f32,
+    }
+
+    /// 动画状态
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AnimationState {
+        pub name: String,
+        pub clip_index: usize,
+        pub transitions: Vec<AnimationTransition>,
+    }
+
+    /// 动画状态机组件
+    #[derive(Component, Debug, Clone, Serialize, Deserialize)]
+    pub struct AnimationStateMachine {
+        pub states: HashMap<String, AnimationState>,
+        pub parameters: HashMap<String, AnimParamValue>,
+        pub current_state: String,
+    }
+
+    impl AnimationStateMachine {
+        pub fn new(initial_state: String) -> Self {
+            Self {
+                states: HashMap::new(),
+                parameters: HashMap::new(),
+                current_state: initial_state,
+            }
+        }
+
+        pub fn set_float(&mut self, name: &str, value: f32) {
+            self.parameters.insert(name.to_string(), AnimParamValue::Float(value));
+        }
+
+        pub fn set_bool(&mut self, name: &str, value: bool) {
+            self.parameters.insert(name.to_string(), AnimParamValue::Bool(value));
+        }
+
+        pub fn trigger(&mut self, name: &str) {
+            self.parameters.insert(name.to_string(), AnimParamValue::Trigger(true));
+        }
+    }
 }
 
 /// 时间系统
